@@ -19,7 +19,8 @@ class Settings(BaseSettings):
 
     open_meteo_base_url: AnyHttpUrl = "https://api.open-meteo.com"
     noaa_base_url: AnyHttpUrl = "https://api.weather.gov"
-    imd_base_url: AnyHttpUrl | None = None
+    imd_base_url: AnyHttpUrl = "https://api.imd.gov.in"
+    imd_station_ids: dict[str, str] = Field(default_factory=dict)
     wis2_mqtt_host: str | None = None
     wis2_mqtt_port: int = 8883
     wis2_mqtt_username: str | None = None

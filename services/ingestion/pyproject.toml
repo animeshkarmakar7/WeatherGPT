@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "WeatherGPT Phase 1 data ingestion service"
 requires-python = ">=3.11"
 dependencies = [
-    "aiokafka>=0.10.0",
+    "aiokafka[zstd]>=0.10.0",
     "celery[redis]>=5.4.0",
     "fastapi>=0.115.0",
     "httpx>=0.27.0",

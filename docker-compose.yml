@@ -14,17 +14,7 @@ services:
       - ./infra/db/001_phase1_ingestion.sql:/docker-entrypoint-initdb.d/001_phase1_ingestion.sql:ro
       - ./infra/db/healthcheck.sh:/usr/local/bin/weathergpt-db-healthcheck.sh:ro
     healthcheck:
-      test:
-        - CMD
-        - psql
-        - -U
-        - weathergpt
-        - -d
-        - weathergpt
-        - -v
-        - ON_ERROR_STOP=1
-        - -c
-        - "DO $$ BEGIN IF NOT (EXISTS (SELECT 1 FROM pg_extension WHERE extname='timescaledb') AND EXISTS (SELECT 1 FROM pg_extension WHERE extname='postgis') AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='weather_observations') AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name='weather_observations')) THEN RAISE EXCEPTION 'WeatherGPT database readiness checks failed'; END IF; END $$;"
+      test: ["CMD-SHELL", "sh /usr/local/bin/weathergpt-db-healthcheck.sh"]
       interval: 10s
       timeout: 5s
       retries: 30

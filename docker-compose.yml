@@ -1,6 +1,6 @@
 services:
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb-ha:pg16.15-ts2.30.0-all-oss
     environment:
       POSTGRES_DB: weathergpt
       POSTGRES_USER: weathergpt
@@ -8,7 +8,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - timescale-data:/var/lib/postgresql/data
+      - timescale-data:/home/postgres/pgdata/data
       - ./infra/db/001_phase1_ingestion.sql:/docker-entrypoint-initdb.d/001_phase1_ingestion.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U weathergpt -d weathergpt"]

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from uuid import NAMESPACE_URL, uuid5
 
 from aiokafka import AIOKafkaConsumer
 from aiokafka.structs import TopicPartition
@@ -16,12 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class ObservationWriter:
-    """Persist normalized Kafka events with at-least-once delivery semantics.
-
-    The database write completes before the Kafka offset is committed. Because
-    the repository performs an idempotent upsert, a crash between these steps
-    results in safe replay instead of a duplicate logical observation.
-    """
+    """Persist normalized Kafka events with at-least-once delivery semantics."""
 
     def __init__(
         self,
@@ -38,10 +34,11 @@ class ObservationWriter:
         try:
             payload = json.loads(raw_value)
             observation = NormalizedObservation.model_validate(payload)
-        except (json.JSONDecodeError, ValidationError, TypeError, UnicodeDecodeError) as exc:
-            # Poison messages are isolated in the DLQ and then acknowledged so
-            # one malformed event cannot permanently block its partition.
+        except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+            # Poison messages are isolated in the DLQ. The deterministic ID
+            # makes PostgreSQL DLQ auditing idempotent across consumer retries.
             dlq_event = DeadLetterEvent(
+                id=uuid5(NAMESPACE_URL, f"{record.topic}:{record.partition}:{record.offset}"),
                 source="kafka-normalized",
                 topic=record.topic,
                 error_type=type(exc).__name__,
@@ -53,13 +50,15 @@ class ObservationWriter:
                 },
             )
             await self.dlq_producer.publish_dead_letter(dlq_event)
+            await self.repository.save_dead_letter(dlq_event)
             await self.consumer.commit(
                 {TopicPartition(record.topic, record.partition): record.offset + 1}
             )
             return "dead_lettered"
 
-        # Database failures intentionally propagate. We do not commit the
-        # Kafka offset until the DB transaction has completed successfully.
+        # The offset is committed only after the DB transaction has completed.
+        # A crash before commit safely replays the event; the DB upsert is
+        # idempotent for the source observation identity.
         await self.repository.save_observation(observation)
         await self.consumer.commit(
             {TopicPartition(record.topic, record.partition): record.offset + 1}
@@ -103,9 +102,9 @@ async def run(settings: Settings | None = None) -> None:
             try:
                 result = await writer.handle(record)
             except Exception:
-                # Do not acknowledge a transient DB/Kafka failure. Stop the
-                # process so the orchestrator can restart it and replay from
-                # the last committed offset safely.
+                # Do not acknowledge transient database/Kafka failures. Exit
+                # so the orchestrator can restart the process and replay from
+                # the last committed offset.
                 logger.exception(
                     "fatal processing error topic=%s partition=%s offset=%s",
                     record.topic,

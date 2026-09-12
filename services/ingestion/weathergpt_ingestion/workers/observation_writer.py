@@ -35,8 +35,6 @@ class ObservationWriter:
             payload = json.loads(raw_value)
             observation = NormalizedObservation.model_validate(payload)
         except (json.JSONDecodeError, ValidationError, TypeError) as exc:
-            # Poison messages are isolated in the DLQ. The deterministic ID
-            # makes PostgreSQL DLQ auditing idempotent across consumer retries.
             dlq_event = DeadLetterEvent(
                 id=uuid5(NAMESPACE_URL, f"{record.topic}:{record.partition}:{record.offset}"),
                 source="kafka-normalized",
@@ -56,9 +54,6 @@ class ObservationWriter:
             )
             return "dead_lettered"
 
-        # The offset is committed only after the DB transaction has completed.
-        # A crash before commit safely replays the event; the DB upsert is
-        # idempotent for the source observation identity.
         await self.repository.save_observation(observation)
         await self.consumer.commit(
             {TopicPartition(record.topic, record.partition): record.offset + 1}
@@ -87,24 +82,28 @@ async def run(settings: Settings | None = None) -> None:
     )
     writer = ObservationWriter(consumer, dlq_producer, repository)
 
-    await repository.start()
-    await dlq_producer.start()
-    await consumer.start()
-
-    logger.info(
-        "observation writer started group_id=%s topic=%s",
-        settings.kafka_observation_writer_group_id,
-        NORMALIZED_OBSERVATION,
-    )
+    repository_started = False
+    producer_started = False
+    consumer_started = False
 
     try:
+        await repository.start()
+        repository_started = True
+        await dlq_producer.start()
+        producer_started = True
+        await consumer.start()
+        consumer_started = True
+
+        logger.info(
+            "observation writer started group_id=%s topic=%s",
+            settings.kafka_observation_writer_group_id,
+            NORMALIZED_OBSERVATION,
+        )
+
         async for record in consumer:
             try:
                 result = await writer.handle(record)
             except Exception:
-                # Do not acknowledge transient database/Kafka failures. Exit
-                # so the orchestrator can restart the process and replay from
-                # the last committed offset.
                 logger.exception(
                     "fatal processing error topic=%s partition=%s offset=%s",
                     record.topic,
@@ -120,9 +119,12 @@ async def run(settings: Settings | None = None) -> None:
                 result,
             )
     finally:
-        await consumer.stop()
-        await dlq_producer.stop()
-        await repository.close()
+        if consumer_started:
+            await consumer.stop()
+        if producer_started:
+            await dlq_producer.stop()
+        if repository_started:
+            await repository.close()
 
 
 if __name__ == "__main__":

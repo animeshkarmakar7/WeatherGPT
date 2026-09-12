@@ -5,6 +5,7 @@ services:
       POSTGRES_DB: weathergpt
       POSTGRES_USER: weathergpt
       POSTGRES_PASSWORD: weathergpt
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
       TIMESCALEDB_TELEMETRY: "off"
     ports:
       - "5432:5432"
@@ -17,9 +18,9 @@ services:
         - >-
           pg_isready -U weathergpt -d weathergpt &&
           test "$(psql -U weathergpt -d weathergpt -tAc
-          "SELECT (SELECT COUNT(*) FROM pg_extension WHERE extname IN ('timescaledb','postgis')) = 2
+          \"SELECT (SELECT COUNT(*) FROM pg_extension WHERE extname IN ('timescaledb','postgis')) = 2
           AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='weather_observations')
-          AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name='weather_observations');")" = "t"
+          AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name='weather_observations');\")" = "t"
       interval: 10s
       timeout: 5s
       retries: 30

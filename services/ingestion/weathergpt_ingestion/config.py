@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, Field, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,8 +8,14 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="WEATHERGPT_", env_file=".env", extra="ignore")
 
     kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_observation_writer_group_id: str = "weathergpt-observation-writers-v1"
+    kafka_consumer_max_poll_records: PositiveInt = 50
+    kafka_consumer_max_poll_interval_ms: PositiveInt = 300000
+
     redis_url: str = "redis://localhost:6379/0"
     database_url: str = "postgresql+psycopg://weathergpt:weathergpt@localhost:5432/weathergpt"
+    database_pool_min_size: PositiveInt = 2
+    database_pool_max_size: PositiveInt = 10
 
     open_meteo_base_url: AnyHttpUrl = "https://api.open-meteo.com"
     noaa_base_url: AnyHttpUrl = "https://api.weather.gov"

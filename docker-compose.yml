@@ -86,6 +86,8 @@ services:
       WEATHERGPT_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       WEATHERGPT_REDIS_URL: redis://redis:6379/0
       WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
+      WEATHERGPT_DATABASE_POOL_MIN_SIZE: 2
+      WEATHERGPT_DATABASE_POOL_MAX_SIZE: 10
     ports:
       - "8081:8081"
     depends_on:
@@ -97,6 +99,28 @@ services:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
+    restart: unless-stopped
+
+  observation-writer:
+    build:
+      context: ./services/ingestion
+    command: python -m weathergpt_ingestion.workers.observation_writer
+    environment:
+      WEATHERGPT_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      WEATHERGPT_KAFKA_OBSERVATION_WRITER_GROUP_ID: weathergpt-observation-writers-v1
+      WEATHERGPT_KAFKA_CONSUMER_MAX_POLL_RECORDS: 50
+      WEATHERGPT_KAFKA_CONSUMER_MAX_POLL_INTERVAL_MS: 300000
+      WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
+      WEATHERGPT_DATABASE_POOL_MIN_SIZE: 2
+      WEATHERGPT_DATABASE_POOL_MAX_SIZE: 10
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
   ingestion-worker:
     build:
@@ -106,8 +130,18 @@ services:
       WEATHERGPT_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       WEATHERGPT_REDIS_URL: redis://redis:6379/0
       WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
+      WEATHERGPT_DATABASE_POOL_MIN_SIZE: 2
+      WEATHERGPT_DATABASE_POOL_MAX_SIZE: 10
     depends_on:
-      - ingestion-api
+      timescaledb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
   ingestion-beat:
     build:
@@ -117,8 +151,12 @@ services:
       WEATHERGPT_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       WEATHERGPT_REDIS_URL: redis://redis:6379/0
       WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
+      WEATHERGPT_DATABASE_POOL_MIN_SIZE: 2
+      WEATHERGPT_DATABASE_POOL_MAX_SIZE: 10
     depends_on:
-      - ingestion-worker
+      ingestion-worker:
+        condition: service_started
+    restart: unless-stopped
 
   spark-streaming:
     image: bitnami/spark:3.5
@@ -133,14 +171,18 @@ services:
       WEATHERGPT_JDBC_DATABASE_URL: jdbc:postgresql://timescaledb:5432/weathergpt
       WEATHERGPT_DATABASE_USER: weathergpt
       WEATHERGPT_DATABASE_PASSWORD: weathergpt
+      WEATHERGPT_SPARK_CHECKPOINT_LOCATION: /checkpoints/kafka-normalized-to-staging
     volumes:
       - ./services/ingestion/weathergpt_ingestion:/app/weathergpt_ingestion:ro
+      - spark-checkpoints:/checkpoints
     depends_on:
       timescaledb:
         condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   timescale-data:
   minio-data:
+  spark-checkpoints:

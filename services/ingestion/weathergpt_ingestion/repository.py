@@ -128,6 +128,7 @@ class WeatherRepository:
                     %(id)s, %(source)s, %(topic)s, %(error_type)s,
                     %(error_message)s, %(payload)s, %(created_at)s
                 )
+                ON CONFLICT (id) DO NOTHING
                 """,
                 {
                     "id": event.id,

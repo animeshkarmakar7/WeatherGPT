@@ -2,56 +2,69 @@
 
 ## Goal
 
-Deliver real weather data flowing through a production-shaped ingestion pipeline before any chatbot or LLM features are added.
+Deliver real weather data flowing through a production-shaped event-driven ingestion pipeline before chatbot or LLM features are added.
 
-## Architecture
+## Authoritative persistence flow
 
-1. Connectors fetch source-specific payloads from Open-Meteo, NOAA, and IMD.
-2. Each connector runs behind retry, timeout, circuit breaker, and last-known-good cache controls.
+1. Connectors fetch source-specific payloads from Open-Meteo, NOAA/NWS, and the IMD/WIS2 adapters.
+2. Connector calls run behind timeout, circuit-breaker, and last-known-good fallback controls.
 3. Raw events are published to source-specific Kafka topics.
-4. Normalized observations are published to `weather.normalized.observation.v1`.
-5. Invalid payloads or processing failures are sent to `weather.dlq.ingestion.v1`.
-6. Spark Structured Streaming can read raw topics for scalable stream/batch processing and staging.
-7. Celery schedules recurring ingestion jobs and handles backfill/retry workloads that do not belong on the synchronous API path.
+4. The connector process normalizes the payload and publishes `weather.normalized.observation.v1`.
+5. A dedicated Kafka observation-writer consumer owns the authoritative TimescaleDB write.
+6. The writer disables Kafka auto-commit, validates the normalized event, writes an idempotent PostgreSQL/TimescaleDB upsert, and commits the Kafka offset only after the DB write succeeds.
+7. Malformed normalized events are published to `weather.dlq.ingestion.v1` and then acknowledged so a poison message cannot block its partition.
+8. Transient database/Kafka failures are not acknowledged; the writer exits and the orchestrator restarts it from the last committed offset.
+9. Spark Structured Streaming consumes the normalized topic independently for staging/analytics. It is not the authoritative observation writer.
+10. Celery schedules source polling and backfill orchestration; it does not directly persist normalized observations.
 
-## Production Decisions From The Blueprint
+## CQRS boundary
 
-- External sources are isolated by connector so NOAA failures cannot stop Open-Meteo ingestion.
-- Dead-letter events preserve malformed payloads for inspection instead of poisoning downstream processors.
-- Numeric weather values are stored as sourced facts with provenance. Later LLM agents should phrase these facts, not invent them.
-- Redis is used for last-known-good upstream fallback and Celery task coordination.
-- TimescaleDB hypertables are used for time-series observations; PostGIS geography enables later spatial queries and alert zones.
+### Command/write side
 
-## Exit Criteria
-
-- `docker compose up --build` starts the ingestion stack.
-- `GET /ready` confirms Redis, Kafka producer initialization, and TimescaleDB access.
-- `POST /ingest/current?city=mumbai` publishes a normalized current-weather event.
-- `GET /observations/current?city=mumbai` returns the latest stored observation after the streaming writer is enabled.
-- Dead-letter topic receives connector or validation failures with enough context to debug the source payload.
-
-## Local Commands
-
-```bash
-docker compose up --build
+```text
+External source
+    -> connector
+    -> raw Kafka topic
+    -> normalized Kafka topic
+    -> observation-writer consumer
+    -> TimescaleDB/PostGIS
 ```
 
-```bash
-curl -X POST "http://localhost:8081/ingest/current?city=mumbai"
-curl "http://localhost:8081/observations/current?city=mumbai"
-```
+### Query/read side
 
-Spark streaming is optional in local development because the API path also persists a normalized demo observation:
+The future Weather Query service should read from optimized read models and Redis rather than from ingestion workers. This keeps external API traffic and user query traffic independent from ingestion throughput.
 
-```bash
-docker compose --profile streaming up spark-streaming
-```
+## Reliability semantics
 
-## Source Connector Status
+- Kafka producer idempotence is enabled.
+- Kafka consumer auto-commit is disabled.
+- DB persistence is committed before the Kafka offset is committed.
+- PostgreSQL/TimescaleDB uses an idempotent `ON CONFLICT` upsert keyed by source observation identity.
+- A crash after DB commit but before Kafka commit causes a safe replay/update rather than a duplicate logical observation.
+- A malformed event is isolated in the DLQ and its source offset is committed.
+
+## Infrastructure
+
+Local Docker Compose provides Kafka, Redis, TimescaleDB/PostGIS, MinIO, the ingestion API, Celery worker/beat, the Kafka observation writer, and optional Spark streaming.
+
+The local Kafka configuration intentionally uses one broker and replication factor 1. This is a development topology; a production deployment must use a multi-broker Kafka cluster with replicated topics and authenticated/encrypted listeners.
+
+## Source connector status
 
 | Source | Status | Notes |
 | --- | --- | --- |
 | Open-Meteo | Runnable | Current conditions for configured cities. |
-| NOAA/NWS | Runnable for supported coordinates | Mainly US coverage; useful for connector hardening and public-domain forecasts. |
-| IMD | Adapter scaffold | Requires an approved feed URL through `WEATHERGPT_IMD_BASE_URL`; do not hardcode unstable scraped endpoints. |
-| WIS2.0/MQTT | Adapter scaffold | Configure broker details and run `weathergpt_ingestion.run_wis2_mqtt_subscriber` as a long-lived worker when a WIS2 broker is available. |
+| NOAA/NWS | Runnable for supported coordinates | Point forecast API; this is not NOAA GFS/NOMADS ingestion. |
+| IMD | Adapter scaffold | Requires an approved IMD API/feed endpoint. |
+| WIS2.0/MQTT | Adapter scaffold | Receives WIS2 notifications and forwards them to Kafka; full referenced-resource ingestion remains a follow-up. |
+
+## Exit criteria
+
+- `docker compose up --build` starts the ingestion API, Kafka observation writer, and dependencies.
+- `GET /ready` checks Redis, TimescaleDB, and Kafka topic metadata.
+- `POST /ingest/current?city=mumbai` publishes raw and normalized Kafka events and returns `status=queued`.
+- The observation writer consumes `weather.normalized.observation.v1` and persists it to `weather_observations`.
+- `GET /observations/current?city=mumbai` returns the persisted observation after the writer processes the event.
+- Duplicate Kafka delivery does not create a duplicate logical observation.
+- Invalid normalized events land in the DLQ and do not stall their Kafka partition.
+- Spark can consume the normalized topic as a separate analytics/staging consumer without becoming the authoritative database writer.

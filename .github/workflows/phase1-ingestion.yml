@@ -42,7 +42,8 @@ jobs:
           docker compose up -d timescaledb
 
           for attempt in {1..30}; do
-            status="$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q timescaledb)")"
+            container_id="$(docker compose ps -q timescaledb)"
+            status="$(docker inspect --format='{{.State.Health.Status}}' "$container_id")"
             if [ "$status" = "healthy" ]; then
               break
             fi
@@ -59,6 +60,30 @@ jobs:
           docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('timescaledb', 'postgis') ORDER BY extname;"
           docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT PostGIS_Version();"
           docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_name = 'weather_observations';"
+
+      - name: Start Kafka and observation writer
+        run: |
+          docker compose up -d kafka
+          docker compose up -d kafka-init
+          docker compose build observation-writer
+          docker compose up -d observation-writer
+
+      - name: Smoke test Kafka to TimescaleDB
+        shell: bash
+        run: |
+          event='{"observed_at":"2026-01-01T00:00:00Z","source":"open_meteo","external_id":"ci:open-meteo:mumbai:2026-01-01T00:00:00Z","location_name":"mumbai","latitude":19.076,"longitude":72.8777,"temp_c":30.5,"wind_speed_kph":12.0,"wind_direction_deg":180.0,"humidity_pct":70.0,"precipitation_mm":0.0,"pressure_hpa":1008.0,"weather_code":"0","quality_flags":[],"provenance":{"source":"open_meteo","connector":"ci","fetched_at":"2026-01-01T00:00:01Z","source_url":"https://api.open-meteo.com/v1/forecast","license":null,"attribution":"Open-Meteo"},"raw_payload":{"ci":true}}'
+          printf '%s\n' "$event" | docker compose exec -T kafka kafka-console-producer --bootstrap-server kafka:29092 --topic weather.normalized.observation.v1
+
+          for attempt in {1..30}; do
+            count="$(docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -tAc "SELECT COUNT(*) FROM weather_observations WHERE external_id = 'ci:open-meteo:mumbai:2026-01-01T00:00:00Z';")"
+            if [ "$count" = "1" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          test "$count" = "1"
+          docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT location_name, temp_c, source, observed_at FROM weather_observations WHERE external_id = 'ci:open-meteo:mumbai:2026-01-01T00:00:00Z';"
 
       - name: Tear down integration services
         if: always()

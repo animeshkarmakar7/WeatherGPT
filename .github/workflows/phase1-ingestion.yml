@@ -35,3 +35,31 @@ jobs:
 
       - name: Validate compose topology
         run: docker compose config --quiet
+
+      - name: Validate TimescaleDB + PostGIS bootstrap
+        shell: bash
+        run: |
+          docker compose up -d timescaledb
+
+          for attempt in {1..30}; do
+            status="$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q timescaledb)")"
+            if [ "$status" = "healthy" ]; then
+              break
+            fi
+            if [ "$status" = "unhealthy" ]; then
+              docker compose logs timescaledb
+              exit 1
+            fi
+            sleep 5
+          done
+
+          status="$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose ps -q timescaledb)")"
+          test "$status" = "healthy"
+
+          docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT extname, extversion FROM pg_extension WHERE extname IN ('timescaledb', 'postgis') ORDER BY extname;"
+          docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT PostGIS_Version();"
+          docker compose exec -T timescaledb psql -U weathergpt -d weathergpt -v ON_ERROR_STOP=1 -c "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_name = 'weather_observations';"
+
+      - name: Tear down integration services
+        if: always()
+        run: docker compose down -v

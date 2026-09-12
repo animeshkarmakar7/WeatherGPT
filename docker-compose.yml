@@ -1,10 +1,11 @@
 services:
   timescaledb:
-    image: timescale/timescaledb-ha:pg16.15-ts2.30.0-all
+    image: timescale/timescaledb-ha:pg16.15-ts2.30.0
     environment:
       POSTGRES_DB: weathergpt
       POSTGRES_USER: weathergpt
       POSTGRES_PASSWORD: weathergpt
+      TIMESCALEDB_TELEMETRY: "off"
     ports:
       - "5432:5432"
     volumes:
@@ -15,13 +16,14 @@ services:
         - CMD-SHELL
         - >-
           pg_isready -U weathergpt -d weathergpt &&
-          psql -U weathergpt -d weathergpt -tAc
-          "SELECT COUNT(*) = 2 FROM pg_extension
-           WHERE extname IN ('timescaledb', 'postgis');" | grep -q t
+          test "$(psql -U weathergpt -d weathergpt -tAc
+          "SELECT (SELECT COUNT(*) FROM pg_extension WHERE extname IN ('timescaledb','postgis')) = 2
+          AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='weather_observations')
+          AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name='weather_observations');")" = "t"
       interval: 10s
       timeout: 5s
-      retries: 20
-      start_period: 20s
+      retries: 30
+      start_period: 30s
     restart: unless-stopped
 
   redis:

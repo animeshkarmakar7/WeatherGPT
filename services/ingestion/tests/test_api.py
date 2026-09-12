@@ -15,7 +15,8 @@ class FakeRepository:
 
 
 class FakeProducer:
-    producer = object()
+    async def ready(self):
+        return True
 
 
 @pytest.mark.asyncio

@@ -1,26 +1,26 @@
+import asyncio
 import json
 import logging
 
 from aiokafka import AIOKafkaConsumer
 from aiokafka.structs import TopicPartition
 from pydantic import ValidationError
-from redis.asyncio import Redis
 
-from ..config import Settings
+from ..config import Settings, get_settings
 from ..kafka import WeatherEventProducer
 from ..models import DeadLetterEvent, NormalizedObservation
 from ..repository import WeatherRepository
-from ..topics import INGESTION_DLQ, NORMALIZED_OBSERVATION
+from ..topics import NORMALIZED_OBSERVATION
 
 logger = logging.getLogger(__name__)
 
 
 class ObservationWriter:
-    """Persist normalized Kafka events using at-least-once delivery semantics.
+    """Persist normalized Kafka events with at-least-once delivery semantics.
 
-    The database write is completed before the Kafka offset is committed. The
-    repository uses an idempotent upsert, so a crash between those operations
-    results in a safe replay rather than a duplicate logical observation.
+    The database write completes before the Kafka offset is committed. Because
+    the repository performs an idempotent upsert, a crash between these steps
+    results in safe replay instead of a duplicate logical observation.
     """
 
     def __init__(
@@ -34,14 +34,13 @@ class ObservationWriter:
         self.repository = repository
 
     async def handle(self, record) -> str:
+        raw_value = record.value.decode("utf-8", errors="replace")
         try:
-            raw_value = record.value.decode("utf-8")
             payload = json.loads(raw_value)
             observation = NormalizedObservation.model_validate(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, TypeError) as exc:
-            # A malformed event is not retryable. Preserve the original bytes
-            # in the DLQ, then commit only this record so one poison message
-            # cannot block the partition indefinitely.
+        except (json.JSONDecodeError, ValidationError, TypeError, UnicodeDecodeError) as exc:
+            # Poison messages are isolated in the DLQ and then acknowledged so
+            # one malformed event cannot permanently block its partition.
             dlq_event = DeadLetterEvent(
                 source="kafka-normalized",
                 topic=record.topic,
@@ -50,7 +49,7 @@ class ObservationWriter:
                 payload={
                     "partition": record.partition,
                     "offset": record.offset,
-                    "raw_value": raw_value if "raw_value" in locals() else record.value.decode("utf-8", errors="replace"),
+                    "raw_value": raw_value,
                 },
             )
             await self.dlq_producer.publish_dead_letter(dlq_event)
@@ -59,8 +58,8 @@ class ObservationWriter:
             )
             return "dead_lettered"
 
-        # Any database failure is deliberately allowed to propagate. The
-        # offset is not committed, so the message is replayed after recovery.
+        # Database failures intentionally propagate. We do not commit the
+        # Kafka offset until the DB transaction has completed successfully.
         await self.repository.save_observation(observation)
         await self.consumer.commit(
             {TopicPartition(record.topic, record.partition): record.offset + 1}
@@ -69,9 +68,7 @@ class ObservationWriter:
 
 
 async def run(settings: Settings | None = None) -> None:
-    settings = settings or __import__(
-        "weathergpt_ingestion.config", fromlist=["get_settings"]
-    ).get_settings()
+    settings = settings or get_settings()
 
     consumer = AIOKafkaConsumer(
         NORMALIZED_OBSERVATION,
@@ -81,7 +78,6 @@ async def run(settings: Settings | None = None) -> None:
         auto_offset_reset="earliest",
         max_poll_records=settings.kafka_consumer_max_poll_records,
         max_poll_interval_ms=settings.kafka_consumer_max_poll_interval_ms,
-        enable_partition_eof=False,
         isolation_level="read_committed",
     )
     dlq_producer = WeatherEventProducer(settings.kafka_bootstrap_servers)
@@ -104,8 +100,20 @@ async def run(settings: Settings | None = None) -> None:
 
     try:
         async for record in consumer:
-            result = await writer.handle(record)
-            logger.debug(
+            try:
+                result = await writer.handle(record)
+            except Exception:
+                # Do not acknowledge a transient DB/Kafka failure. Stop the
+                # process so the orchestrator can restart it and replay from
+                # the last committed offset safely.
+                logger.exception(
+                    "fatal processing error topic=%s partition=%s offset=%s",
+                    record.topic,
+                    record.partition,
+                    record.offset,
+                )
+                raise
+            logger.info(
                 "processed topic=%s partition=%s offset=%s result=%s",
                 record.topic,
                 record.partition,
@@ -119,7 +127,5 @@ async def run(settings: Settings | None = None) -> None:
 
 
 if __name__ == "__main__":
-    import asyncio
-
     logging.basicConfig(level=logging.INFO)
     asyncio.run(run())

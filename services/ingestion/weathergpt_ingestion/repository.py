@@ -1,18 +1,36 @@
 from typing import Any
 
 import psycopg
-from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 from .models import DeadLetterEvent, IngestionRun, IngestionStatus, NormalizedObservation
 
 
 class WeatherRepository:
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        min_size: int = 2,
+        max_size: int = 10,
+    ) -> None:
         self.database_url = database_url.replace("postgresql+psycopg://", "postgresql://")
+        self.pool = AsyncConnectionPool(
+            conninfo=self.database_url,
+            min_size=min_size,
+            max_size=max_size,
+            open=False,
+        )
+
+    async def start(self) -> None:
+        await self.pool.open()
+
+    async def close(self) -> None:
+        await self.pool.close()
 
     async def save_observation(self, observation: NormalizedObservation) -> None:
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with self.pool.connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO weather_observations (
@@ -45,13 +63,17 @@ class WeatherRepository:
             )
 
     async def ping(self) -> bool:
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
-            cursor = await conn.execute("SELECT 1")
-            row = await cursor.fetchone()
-            return row is not None
+        try:
+            async with self.pool.connection() as conn:
+                cursor = await conn.execute("SELECT 1")
+                row = await cursor.fetchone()
+                return row is not None
+        except (psycopg.Error, TimeoutError):
+            return False
 
     async def latest_observation(self, city: str) -> dict[str, Any] | None:
-        async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
+        city = city.strip().lower()
+        async with self.pool.connection() as conn:
             cursor = await conn.execute(
                 """
                 SELECT *
@@ -60,12 +82,12 @@ class WeatherRepository:
                 ORDER BY observed_at DESC
                 LIMIT 1
                 """,
-                {"city": city.lower()},
+                {"city": city},
             )
             return await cursor.fetchone()
 
     async def list_runs(self, limit: int = 25) -> list[dict[str, Any]]:
-        async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
+        async with self.pool.connection() as conn:
             cursor = await conn.execute(
                 """
                 SELECT *
@@ -75,10 +97,11 @@ class WeatherRepository:
                 """,
                 {"limit": limit},
             )
-            return list(await cursor.fetchall())
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def list_dead_letters(self, limit: int = 25) -> list[dict[str, Any]]:
-        async with await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row) as conn:
+        async with self.pool.connection() as conn:
             cursor = await conn.execute(
                 """
                 SELECT *
@@ -88,10 +111,11 @@ class WeatherRepository:
                 """,
                 {"limit": limit},
             )
-            return list(await cursor.fetchall())
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def save_dead_letter(self, event: DeadLetterEvent) -> None:
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with self.pool.connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO ingestion_dead_letters (
@@ -104,7 +128,7 @@ class WeatherRepository:
                 """,
                 {
                     "id": event.id,
-                    "source": event.source.value,
+                    "source": event.source,
                     "topic": event.topic,
                     "error_type": event.error_type,
                     "error_message": event.error_message,
@@ -114,7 +138,7 @@ class WeatherRepository:
             )
 
     async def start_run(self, run: IngestionRun) -> None:
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with self.pool.connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO ingestion_runs (id, source, connector, status, started_at)
@@ -137,7 +161,7 @@ class WeatherRepository:
         records_published: int,
         error_message: str | None = None,
     ) -> None:
-        async with await psycopg.AsyncConnection.connect(self.database_url) as conn:
+        async with self.pool.connection() as conn:
             await conn.execute(
                 """
                 UPDATE ingestion_runs

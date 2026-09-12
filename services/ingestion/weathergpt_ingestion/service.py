@@ -9,6 +9,13 @@ from .repository import WeatherRepository
 
 
 class IngestionService:
+    """Fetch, normalize, and publish weather events.
+
+    Kafka is the authoritative hand-off for persistence. This service does not
+    write normalized observations directly to TimescaleDB; the dedicated Kafka
+    observation writer owns that side effect after successful offset handling.
+    """
+
     def __init__(
         self,
         settings: Settings,
@@ -34,10 +41,11 @@ class IngestionService:
             await self.producer.publish_raw(event)
             observation = normalize_event(event)
             await self.producer.publish_normalized(observation)
-            await self.repository.save_observation(observation)
             await self.repository.finish_run(run, IngestionStatus.SUCCEEDED, 1, 2)
             return {
                 "run_id": str(run.id),
+                "status": "queued",
+                "persistence": "kafka",
                 "published_topic": event.topic,
                 "normalized_topic": "weather.normalized.observation.v1",
                 "location": event.location_name,
@@ -46,7 +54,7 @@ class IngestionService:
             }
         except Exception as exc:
             dlq_event = DeadLetterEvent(
-                source=source,
+                source=source.value,
                 topic=getattr(connector, "topic", "unknown"),
                 error_type=type(exc).__name__,
                 error_message=str(exc),

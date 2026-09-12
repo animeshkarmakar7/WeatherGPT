@@ -1,6 +1,8 @@
 OPEN_METEO_CURRENT = "weather.raw.open_meteo.current.v1"
 NOAA_FORECAST = "weather.raw.noaa.forecast.v1"
+NOAA_CURRENT = "weather.raw.noaa.current.v1"
 IMD_BULLETIN = "weather.raw.imd.bulletin.v1"
+IMD_CURRENT = "weather.raw.imd.current.v1"
 WIS2_NOTIFICATION = "weather.raw.wis2.notification.v1"
 NORMALIZED_OBSERVATION = "weather.normalized.observation.v1"
 INGESTION_DLQ = "weather.dlq.ingestion.v1"

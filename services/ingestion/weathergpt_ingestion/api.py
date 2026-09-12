@@ -16,12 +16,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     producer = WeatherEventProducer(settings.kafka_bootstrap_servers)
+    repository = WeatherRepository(
+        settings.database_url,
+        min_size=settings.database_pool_min_size,
+        max_size=settings.database_pool_max_size,
+    )
     await producer.start()
+    await repository.start()
     app.state.redis = redis
     app.state.producer = producer
-    app.state.repository = WeatherRepository(settings.database_url)
+    app.state.repository = repository
     yield
     await producer.stop()
+    await repository.close()
     await redis.aclose()
 
 
@@ -38,7 +45,7 @@ async def ready() -> dict[str, object]:
     checks: dict[str, bool] = {}
     checks["redis"] = bool(await app.state.redis.ping())
     checks["database"] = await app.state.repository.ping()
-    checks["kafka_producer"] = app.state.producer.producer is not None
+    checks["kafka_producer"] = await app.state.producer.ready()
     ready_state = all(checks.values())
     if not ready_state:
         raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
@@ -55,8 +62,8 @@ async def ingest_current(city: str, source: SourceName = SourceName.OPEN_METEO) 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except UnsupportedSourceError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception:
+        raise HTTPException(status_code=502, detail="weather ingestion failed") from None
 
 
 @app.get("/observations/current")

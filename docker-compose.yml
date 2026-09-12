@@ -12,15 +12,9 @@ services:
     volumes:
       - timescale-data:/home/postgres/pgdata/data
       - ./infra/db/001_phase1_ingestion.sql:/docker-entrypoint-initdb.d/001_phase1_ingestion.sql:ro
+      - ./infra/db/healthcheck.sh:/usr/local/bin/weathergpt-db-healthcheck.sh:ro
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          pg_isready -U weathergpt -d weathergpt &&
-          test "$(psql -U weathergpt -d weathergpt -tAc
-          \"SELECT (SELECT COUNT(*) FROM pg_extension WHERE extname IN ('timescaledb','postgis')) = 2
-          AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='weather_observations')
-          AND EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_name='weather_observations');\")" = "t"
+      test: ["CMD-SHELL", "sh /usr/local/bin/weathergpt-db-healthcheck.sh"]
       interval: 10s
       timeout: 5s
       retries: 30

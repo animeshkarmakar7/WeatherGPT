@@ -74,6 +74,7 @@ class WeatherRepository:
     async def latest_observation(self, city: str) -> dict[str, Any] | None:
         city = city.strip().lower()
         async with self.pool.connection() as conn:
+            conn.row_factory = dict_row
             cursor = await conn.execute(
                 """
                 SELECT *
@@ -88,6 +89,7 @@ class WeatherRepository:
 
     async def list_runs(self, limit: int = 25) -> list[dict[str, Any]]:
         async with self.pool.connection() as conn:
+            conn.row_factory = dict_row
             cursor = await conn.execute(
                 """
                 SELECT *
@@ -98,10 +100,11 @@ class WeatherRepository:
                 {"limit": limit},
             )
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            return list(rows)
 
     async def list_dead_letters(self, limit: int = 25) -> list[dict[str, Any]]:
         async with self.pool.connection() as conn:
+            conn.row_factory = dict_row
             cursor = await conn.execute(
                 """
                 SELECT *
@@ -112,7 +115,7 @@ class WeatherRepository:
                 {"limit": limit},
             )
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            return list(rows)
 
     async def save_dead_letter(self, event: DeadLetterEvent) -> None:
         async with self.pool.connection() as conn:

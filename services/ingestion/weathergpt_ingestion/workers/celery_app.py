@@ -41,9 +41,14 @@ def run_wis2_mqtt_subscriber() -> str:
 async def _ingest_default_cities() -> list[dict[str, str]]:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     producer = WeatherEventProducer(settings.kafka_bootstrap_servers)
-    repository = WeatherRepository(settings.database_url)
+    repository = WeatherRepository(
+        settings.database_url,
+        min_size=settings.database_pool_min_size,
+        max_size=settings.database_pool_max_size,
+    )
     connector = OpenMeteoConnector(settings, redis)
     await producer.start()
+    await repository.start()
     results: list[dict[str, str]] = []
     try:
         for city, coordinates in settings.default_cities.items():
@@ -54,25 +59,24 @@ async def _ingest_default_cities() -> list[dict[str, str]]:
                 await producer.publish_raw(event)
                 observation = normalize_event(event)
                 await producer.publish_normalized(observation)
-                await repository.save_observation(observation)
                 await repository.finish_run(run, IngestionStatus.SUCCEEDED, 1, 2)
-                results.append({"city": city, "status": "succeeded"})
+                results.append({"city": city, "status": "queued"})
             except Exception as exc:
-                await producer.publish_dead_letter(
-                    dlq_event := DeadLetterEvent(
-                        source=SourceName.OPEN_METEO,
-                        topic=connector.topic,
-                        error_type=type(exc).__name__,
-                        error_message=str(exc),
-                        payload={"city": city},
-                    )
+                dlq_event = DeadLetterEvent(
+                    source=SourceName.OPEN_METEO.value,
+                    topic=connector.topic,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    payload={"city": city},
                 )
+                await producer.publish_dead_letter(dlq_event)
                 await repository.save_dead_letter(dlq_event)
                 await repository.finish_run(run, IngestionStatus.FAILED, 0, 0, str(exc))
                 results.append({"city": city, "status": "failed"})
         return results
     finally:
         await connector.close()
+        await repository.close()
         await producer.stop()
         await redis.aclose()
 
@@ -80,8 +84,13 @@ async def _ingest_default_cities() -> list[dict[str, str]]:
 async def _run_wis2_mqtt_subscriber() -> None:
     loop = asyncio.get_running_loop()
     producer = WeatherEventProducer(settings.kafka_bootstrap_servers)
-    repository = WeatherRepository(settings.database_url)
+    repository = WeatherRepository(
+        settings.database_url,
+        min_size=settings.database_pool_min_size,
+        max_size=settings.database_pool_max_size,
+    )
     await producer.start()
+    await repository.start()
 
     def on_message(payload: dict) -> None:
         asyncio.run_coroutine_threadsafe(
@@ -96,4 +105,5 @@ async def _run_wis2_mqtt_subscriber() -> None:
     try:
         Wis2MqttSubscriber(settings, on_message=on_message, on_dead_letter=on_dead_letter).run_forever()
     finally:
+        await repository.close()
         await producer.stop()

@@ -60,7 +60,7 @@ class FakeRepository:
 
 
 @pytest.mark.asyncio
-async def test_ingestion_service_publishes_raw_normalized_and_persists_observation():
+async def test_ingestion_service_publishes_events_without_direct_db_persistence():
     event = RawWeatherEvent(
         source=SourceName.OPEN_METEO,
         topic=OPEN_METEO_CURRENT,
@@ -86,9 +86,11 @@ async def test_ingestion_service_publishes_raw_normalized_and_persists_observati
     result = await service.ingest_current("mumbai")
 
     assert result["source"] == "open_meteo"
+    assert result["status"] == "queued"
+    assert result["persistence"] == "kafka"
     assert len(producer.raw) == 1
     assert len(producer.normalized) == 1
-    assert len(repository.observations) == 1
+    assert repository.observations == []
     assert repository.finished[0][2:4] == (1, 2)
     assert connector.closed is True
 

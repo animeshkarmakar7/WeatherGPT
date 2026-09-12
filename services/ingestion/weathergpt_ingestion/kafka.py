@@ -24,10 +24,10 @@ class WeatherEventProducer:
         await self.producer.stop()
 
     async def ready(self) -> bool:
-        """Perform a real broker metadata check rather than object existence."""
+        """Verify that the connected broker has metadata for our topic."""
         try:
-            metadata = await self.producer.client.cluster.request_update()
-            return metadata is None or self.producer.client.cluster.leader_for_partition is not None
+            partitions = await self.producer.partitions_for(NORMALIZED_OBSERVATION)
+            return bool(partitions)
         except Exception:
             return False
 

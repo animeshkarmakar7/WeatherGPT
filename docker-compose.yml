@@ -75,6 +75,7 @@ services:
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.raw.open_meteo.current.v1 --partitions 6 --replication-factor 1
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.raw.noaa.forecast.v1 --partitions 6 --replication-factor 1
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.raw.imd.bulletin.v1 --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.raw.imd.current.v1 --partitions 3 --replication-factor 1
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.raw.wis2.notification.v1 --partitions 6 --replication-factor 1
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.normalized.observation.v1 --partitions 12 --replication-factor 1
         kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic weather.dlq.ingestion.v1 --partitions 3 --replication-factor 1

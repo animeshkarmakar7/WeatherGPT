@@ -1,6 +1,6 @@
 services:
   timescaledb:
-    image: timescale/timescaledb-ha:pg16.15-ts2.30.0-all-oss
+    image: timescale/timescaledb-ha:pg16.15-ts2.30.0-all
     environment:
       POSTGRES_DB: weathergpt
       POSTGRES_USER: weathergpt
@@ -11,10 +11,17 @@ services:
       - timescale-data:/home/postgres/pgdata/data
       - ./infra/db/001_phase1_ingestion.sql:/docker-entrypoint-initdb.d/001_phase1_ingestion.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U weathergpt -d weathergpt"]
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U weathergpt -d weathergpt &&
+          psql -U weathergpt -d weathergpt -tAc
+          "SELECT COUNT(*) = 2 FROM pg_extension
+           WHERE extname IN ('timescaledb', 'postgis');" | grep -q t
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 20
+      start_period: 20s
 
   redis:
     image: redis:7-alpine

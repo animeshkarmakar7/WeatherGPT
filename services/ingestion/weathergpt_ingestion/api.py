@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
+from redis.asyncio import Redis
 
 from .config import get_settings
 from .kafka import WeatherEventProducer
@@ -13,9 +14,7 @@ from .service import IngestionService, UnknownLocationError, UnsupportedSourceEr
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    redis = __import__("redis.asyncio", fromlist=["Redis"]).Redis.from_url(
-        settings.redis_url, decode_responses=True
-    )
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
     producer = WeatherEventProducer(settings.kafka_bootstrap_servers)
     repository = WeatherRepository(
         settings.database_url,

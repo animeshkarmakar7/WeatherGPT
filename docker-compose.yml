@@ -22,6 +22,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 20s
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
@@ -32,12 +33,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.1
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+    restart: unless-stopped
 
   kafka:
     image: confluentinc/cp-kafka:7.6.1
@@ -52,11 +55,13 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
       test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
       timeout: 10s
       retries: 15
+    restart: unless-stopped
 
   kafka-init:
     image: confluentinc/cp-kafka:7.6.1
@@ -85,6 +90,7 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+    restart: unless-stopped
 
   ingestion-api:
     build:

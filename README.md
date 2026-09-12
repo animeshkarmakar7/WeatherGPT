@@ -7,7 +7,7 @@ The repository starts with Phase 1 from the build blueprint: real weather data i
 ## Phase 1 Scope
 
 - Source connectors for Open-Meteo, NOAA/NWS, and IMD/WIS2 adapter scaffolding.
-- Timeout, circuit breaker, and last-known-good behavior for upstream resilience.
+- Timeouts, circuit breaker, and last-known-good fallback behavior for upstream resilience.
 - Idempotent Kafka producer configuration and versioned topic contracts with DLQ routing.
 - Kafka consumer groups with manual offset commits for authoritative database persistence.
 - PostgreSQL/TimescaleDB connection pooling and idempotent observation upserts.

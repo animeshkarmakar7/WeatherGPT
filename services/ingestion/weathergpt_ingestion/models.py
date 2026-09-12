@@ -83,12 +83,21 @@ class NormalizedObservation(BaseModel):
     def validate_observation(self) -> "NormalizedObservation":
         _validate_coordinates(self.latitude, self.longitude)
         _validate_percent(self.humidity_pct, "humidity_pct")
+        _validate_non_negative(self.wind_speed_kph, "wind_speed_kph")
+        _validate_non_negative(self.precipitation_mm, "precipitation_mm")
+        if self.wind_direction_deg is not None and not 0 <= self.wind_direction_deg <= 360:
+            raise ValueError("wind_direction_deg must be between 0 and 360")
         return self
+
+    @field_validator("location_name")
+    @classmethod
+    def normalize_location_name(cls, value: str) -> str:
+        return value.strip().lower()
 
 
 class DeadLetterEvent(BaseModel):
     id: UUID = Field(default_factory=uuid4)
-    source: SourceName
+    source: str
     topic: str
     error_type: str
     error_message: str
@@ -118,3 +127,8 @@ def _validate_coordinates(latitude: float, longitude: float) -> None:
 def _validate_percent(value: float | None, field_name: str) -> None:
     if value is not None and not 0 <= value <= 100:
         raise ValueError(f"{field_name} must be between 0 and 100")
+
+
+def _validate_non_negative(value: float | None, field_name: str) -> None:
+    if value is not None and value < 0:
+        raise ValueError(f"{field_name} must be non-negative")

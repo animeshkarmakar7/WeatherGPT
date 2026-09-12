@@ -50,13 +50,50 @@ def normalize_event(event: RawWeatherEvent) -> NormalizedObservation:
             raw_payload=event.payload,
         )
 
+    if event.source == SourceName.IMD:
+        current = _first_record(event.payload)
+        return NormalizedObservation(
+            observed_at=event.observed_at,
+            source=event.source,
+            external_id=event.external_id,
+            location_name=event.location_name,
+            latitude=event.latitude,
+            longitude=event.longitude,
+            temp_c=_number(current.get("Temperature")),
+            wind_speed_kph=_number(current.get("Wind Speed")),
+            wind_direction_deg=_number(current.get("Wind Direction")),
+            humidity_pct=_number(current.get("Humidity")),
+            precipitation_mm=_number(current.get("Last 24 hrs Rainfall")),
+            pressure_hpa=_number(current.get("M.S.L.P")),
+            weather_code=_string(current.get("Weather Code")),
+            quality_flags=event.quality_flags,
+            provenance=event.provenance,
+            raw_payload=event.payload,
+        )
+
     raise ValueError(f"no normalizer registered for source {event.source}")
 
 
+def _first_record(payload: object) -> dict[str, Any]:
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0]
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        return payload
+    raise ValueError("unexpected weather payload shape")
+
+
 def _number(value: Any) -> float | None:
-    if value is None:
+    if value is None or value == "":
         return None
-    return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _string(value: Any) -> str | None:

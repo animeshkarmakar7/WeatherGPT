@@ -1,0 +1,37 @@
+name: Phase 1 Ingestion
+
+on:
+  push:
+    paths:
+      - "services/ingestion/**"
+      - "infra/**"
+      - "docker-compose.yml"
+      - ".github/workflows/phase1-ingestion.yml"
+  pull_request:
+    paths:
+      - "services/ingestion/**"
+      - "infra/**"
+      - "docker-compose.yml"
+      - ".github/workflows/phase1-ingestion.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ingestion service
+        run: python -m pip install -e "services/ingestion[dev]"
+
+      - name: Compile package
+        run: python -m compileall services/ingestion/weathergpt_ingestion
+
+      - name: Run tests
+        run: python -m pytest services/ingestion/tests
+
+      - name: Validate compose topology
+        run: docker compose config --quiet

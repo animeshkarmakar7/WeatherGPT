@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.env
+*.egg-info/
+
+verify-*.png
+tmp/
+
+timescale-data/
+minio-data/
+
+*.pdf
+*.png

@@ -1,0 +1,25 @@
+topics:
+  - name: weather.raw.open_meteo.current.v1
+    partitions: 6
+    replication_factor: 1
+    retention_ms: 604800000
+  - name: weather.raw.noaa.forecast.v1
+    partitions: 6
+    replication_factor: 1
+    retention_ms: 604800000
+  - name: weather.raw.imd.bulletin.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.raw.wis2.notification.v1
+    partitions: 6
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.normalized.observation.v1
+    partitions: 12
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.dlq.ingestion.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000

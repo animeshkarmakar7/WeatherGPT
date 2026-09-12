@@ -11,6 +11,10 @@ class WeatherEventProducer:
             bootstrap_servers=bootstrap_servers,
             value_serializer=stable_json,
             key_serializer=lambda value: value.encode("utf-8"),
+            enable_idempotence=True,
+            compression_type="zstd",
+            linger_ms=5,
+            request_timeout_ms=30000,
         )
 
     async def start(self) -> None:
@@ -18,6 +22,14 @@ class WeatherEventProducer:
 
     async def stop(self) -> None:
         await self.producer.stop()
+
+    async def ready(self) -> bool:
+        """Perform a real broker metadata check rather than object existence."""
+        try:
+            metadata = await self.producer.client.cluster.request_update()
+            return metadata is None or self.producer.client.cluster.leader_for_partition is not None
+        except Exception:
+            return False
 
     async def publish_raw(self, event: RawWeatherEvent) -> None:
         await self.producer.send_and_wait(

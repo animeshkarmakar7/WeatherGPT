@@ -2,73 +2,102 @@
 
 Production-oriented conversational weather intelligence platform.
 
-The repository starts with Phase 1 from the build blueprint: real weather data ingestion through source connectors, Kafka events, a dedicated Kafka-to-TimescaleDB writer, Spark/Celery processing, and TimescaleDB-ready storage contracts.
+## Trust Model
 
-## Phase 1 Scope
+Weather facts come only from verified ingestion or live upstream providers. The system does not generate synthetic weather values. Government guidance comes only from ingested official documents. The LLM generates language from supplied structured weather facts or retrieved document evidence and does not act as a source of truth.
 
-- Source connectors for Open-Meteo, NOAA/NWS, and IMD/WIS2 adapter scaffolding.
-- Timeouts, circuit breaker, and last-known-good fallback behavior for upstream resilience.
-- Idempotent Kafka producer configuration and versioned topic contracts with DLQ routing.
-- Kafka consumer groups with manual offset commits for authoritative database persistence.
-- PostgreSQL/TimescaleDB connection pooling and idempotent observation upserts.
-- Celery worker tasks for scheduled ingestion and backfill orchestration.
-- Spark Structured Streaming as a separate normalized-event analytics/staging consumer.
-- Database schema for weather observations, ingestion runs, and DLQ records.
-- Local Docker Compose topology for Kafka, Redis, TimescaleDB/PostGIS, MinIO, Spark, ingestion API, and the observation writer.
-- CI gate for ingestion tests, package compilation, and Compose validation.
+## Phase 1
 
-## Authoritative Phase 1 Flow
+- Open-Meteo, NOAA/NWS and IMD ingestion connectors
+- Kafka raw and normalized event contracts
+- At-least-once Kafka consumption with idempotent TimescaleDB writes
+- TimescaleDB and PostGIS weather storage
+- Spark Structured Streaming staging path
+- Circuit breaking and last-known-good handling without synthetic values
+
+## Phase 2
+
+- FastAPI chat service
+- LangGraph query orchestration
+- TimescaleDB-backed weather queries
+- Strict OpenAI-compatible LLM contract through vLLM
+- React frontend
+
+## Phase 3
+
+- Government document upload to MinIO
+- PDF page-aware extraction with PyMuPDF
+- Section-aware chunking
+- BGE-M3 embeddings
+- Qdrant vector storage
+- BM25 plus dense hybrid retrieval
+- Optional cross-encoder reranking
+- LLM grounded RAG synthesis with citation IDs
+- RAGAS retrieval and generation evaluation
+
+## Local Services
 
 ```text
-External Weather Source
-        -> Connector
-        -> Raw Kafka Topic
-        -> Normalization
-        -> weather.normalized.observation.v1
-        -> Observation Writer Consumer
-        -> TimescaleDB/PostGIS
-        -> Future CQRS Read Model / Redis
-        -> Query API
+8081  ingestion API
+8082  chat API
+3000  frontend
+5432  TimescaleDB/PostGIS
+6333  Qdrant
+6379  Redis
+8000  vLLM when running locally
+9000  MinIO API
+9001  MinIO console
+9092  Kafka
 ```
 
-The ingestion API no longer writes observations directly to PostgreSQL. It returns `status=queued` after the normalized event is durably handed to Kafka. The observation writer persists the event and commits the Kafka offset only after the database transaction succeeds.
-
-## Quick Start
+## Start Infrastructure
 
 ```bash
 docker compose up --build
 ```
 
-Health check:
+Run a local vLLM server for the chat service:
 
 ```bash
-curl http://localhost:8081/health
-curl http://localhost:8081/ready
+vllm serve Qwen/Qwen2.5-7B-Instruct --host 0.0.0.0 --port 8000 --api-key dummy-vllm-key --generation-config vllm
 ```
 
-Run a one-shot ingestion for a configured city:
+Or use the included vLLM compose file on a GPU host:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.llm.yml up --build
+```
+
+The chat service intentionally fails startup when the configured LLM is unavailable. It does not silently substitute a fake model.
+
+## Phase 1 Check
 
 ```bash
 curl -X POST "http://localhost:8081/ingest/current?city=mumbai"
-```
-
-Then query the database-backed observation after the Kafka writer processes the event:
-
-```bash
 curl "http://localhost:8081/observations/current?city=mumbai"
 ```
 
-Run the optional Spark staging/analytics consumer:
+## RAG Document Ingestion
 
 ```bash
-docker compose --profile streaming up spark-streaming
+curl -X POST "http://localhost:8082/api/v1/rag/ingest" \
+  -F "file=@official-cyclone-sop.pdf" \
+  -F "doc_id=ndma-cyclone-sop-2026" \
+  -F "doc_name=NDMA Cyclone SOP" \
+  -F "doc_type=government_sop" \
+  -F "region=coastal" \
+  -F "language=en" \
+  -F "doc_date=2026-03-01"
 ```
 
-## Project Layout
+Query the knowledge base:
 
-```text
-services/ingestion/        Phase 1 ingestion microservice
-infra/db/                  TimescaleDB/PostGIS schema
-infra/kafka/               Topic definitions
-docs/phase-1-ingestion.md  Architecture and operating notes
+```bash
+curl -X POST "http://localhost:8082/api/v1/rag/query?query=What%20does%20a%20Stage%202%20cyclone%20alert%20require%3F"
+```
+
+Run the RAG evaluation:
+
+```bash
+curl "http://localhost:8082/api/v1/rag/eval"
 ```

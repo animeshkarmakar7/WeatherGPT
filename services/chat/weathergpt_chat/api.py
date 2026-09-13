@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from hashlib import sha256
 from typing import AsyncIterator
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from .orchestrator import create_weather_orchestrator
 from .query_service import WeatherDataQueryService
 from .session_store import SessionStore
 from .rag import BGEM3Embedder, DocumentChunker, DocumentType, HybridRetriever, MinioDocumentStore, QdrantVectorStoreClient, RAGEvaluator, RAGResponse, RAGSynthesizer
+from .rag.chunker import ParsedPage
 
 
 @asynccontextmanager
@@ -32,48 +34,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await redis.aclose()
         raise RuntimeError("Configured LLM service is unavailable")
 
-    embedder = BGEM3Embedder(
-        model_path=settings.bge_model_path,
-        use_fp16=settings.bge_fp16,
-        vector_dim=1024,
-    )
-    if settings.use_qdrant:
-        vector_store = QdrantVectorStoreClient(
-            url=settings.qdrant_url,
-            collection_name=settings.qdrant_collection,
-        )
-    else:
-        raise RuntimeError("Production chat service requires Qdrant")
-
+    embedder = BGEM3Embedder(settings.bge_model_path, settings.bge_fp16, 1024)
+    vector_store = QdrantVectorStoreClient(settings.qdrant_url, settings.qdrant_collection, 1024)
     vector_store.get_all_chunks()
     retriever = HybridRetriever(vector_store, embedder, rrf_k=60)
     retriever.build_bm25_index()
     synthesizer = RAGSynthesizer(
-        retriever=retriever,
-        llm_base_url=settings.llm_base_url,
-        llm_api_key=settings.llm_api_key,
-        llm_model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        min_confidence=settings.rag_min_score,
+        retriever,
+        settings.llm_base_url,
+        settings.llm_api_key,
+        settings.llm_model,
+        settings.llm_timeout_seconds,
+        settings.rag_min_score,
     )
-
-    evaluator = RAGEvaluator(
-        embedder=embedder,
-        llm_base_url=settings.llm_base_url,
-        llm_api_key=settings.llm_api_key,
-        llm_model=settings.llm_model,
-        llm_timeout_seconds=settings.llm_timeout_seconds,
-    )
+    evaluator = RAGEvaluator(embedder, settings.llm_base_url, settings.llm_api_key, settings.llm_model, settings.llm_timeout_seconds)
     evaluator.setup_benchmark_corpus()
 
     session_store = SessionStore(redis, settings.session_ttl_seconds)
-    minio_store = MinioDocumentStore(
-        endpoint=settings.minio_endpoint,
-        access_key=settings.minio_access_key,
-        secret_key=settings.minio_secret_key,
-        secure=settings.minio_secure,
-        bucket_name=settings.minio_bucket,
-    )
+    minio_store = MinioDocumentStore(settings.minio_endpoint, settings.minio_access_key, settings.minio_secret_key, settings.minio_secure, settings.minio_bucket)
     chunker = DocumentChunker()
     orchestrator = create_weather_orchestrator(query_service, llm_client, rag_synthesizer=synthesizer)
 
@@ -99,14 +77,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.5.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health")
@@ -129,7 +100,7 @@ async def ready() -> dict[str, object]:
         checks["knowledge_base"] = len(chunks) > 0
     except Exception:
         pass
-    required = all(checks[name] for name in ("database", "redis", "qdrant", "llm"))
+    required = all(bool(checks[key]) for key in ("database", "redis", "qdrant", "llm"))
     return {"status": "ready" if required else "degraded", "checks": checks}
 
 
@@ -137,17 +108,7 @@ async def ready() -> dict[str, object]:
 async def handle_message(req: ChatMessageRequest) -> ChatMessageResponse:
     session_id = req.session_id or str(uuid4())
     await app.state.session_store.add_message(session_id, "user", req.message)
-    result = await app.state.orchestrator.ainvoke(
-        {
-            "user_message": req.message,
-            "session_id": session_id,
-            "classification": None,
-            "weather_fact": None,
-            "rag_response": None,
-            "structured_response": None,
-            "final_text": None,
-        }
-    )
+    result = await app.state.orchestrator.ainvoke({"user_message": req.message, "session_id": session_id, "classification": None, "weather_fact": None, "rag_response": None, "structured_response": None, "final_text": None})
     response_text = result.get("final_text") or "No verified answer is available for this request."
     structured = result.get("structured_response")
     intent = result["classification"].intent if result.get("classification") else IntentType.WEATHER_CURRENT
@@ -191,25 +152,18 @@ async def ingest_document(
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    object_name = f"{doc_type}/{doc_id}/{file.filename or 'document'}"
+    file_hash = sha256(raw_bytes).hexdigest()
+    object_name = f"{doc_type}/{doc_id}/{file_hash}/{file.filename or 'document'}"
     storage_uri = app.state.minio_store.upload_document(object_name, raw_bytes, content_type=file.content_type or "application/octet-stream")
 
-    if (file.filename or "").lower().endswith(".pdf") or file.content_type == "application/pdf":
+    if file.content_type == "application/pdf" or (file.filename or "").lower().endswith(".pdf"):
         try:
-            pdf = fitz.open(stream=raw_bytes, filetype="pdf")
-            pages = [app.state.chunker.__class__.__dict__ if False else None]
-            parsed_pages = []
-            from .rag.chunker import ParsedPage
-            for page_number, page in enumerate(pdf, start=1):
-                text = page.get_text("text").strip()
-                if text:
-                    parsed_pages.append(ParsedPage(page_number=page_number, text=text))
-            pdf.close()
+            with fitz.open(stream=raw_bytes, filetype="pdf") as pdf:
+                parsed_pages = [ParsedPage(page_number=index, text=page.get_text("text").strip()) for index, page in enumerate(pdf, start=1)]
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"PDF parsing failed: {exc}") from exc
     else:
         try:
-            from .rag.chunker import ParsedPage
             parsed_pages = [ParsedPage(page_number=1, text=raw_bytes.decode("utf-8"))]
         except UnicodeDecodeError as exc:
             raise HTTPException(status_code=422, detail="Only UTF-8 text or PDF documents are supported") from exc
@@ -231,12 +185,4 @@ async def ingest_document(
     app.state.vector_store.insert_chunks(chunks, vectors)
     app.state.retriever.build_bm25_index()
 
-    return {
-        "status": "ingested",
-        "doc_id": doc_id,
-        "doc_name": doc_name,
-        "doc_type": doc_type,
-        "chunks_created": len(chunks),
-        "storage_uri": storage_uri,
-        "knowledge_base_size": len(app.state.vector_store.get_all_chunks()),
-    }
+    return {"status": "ingested", "doc_id": doc_id, "doc_name": doc_name, "doc_type": doc_type, "sha256": file_hash, "chunks_created": len(chunks), "storage_uri": storage_uri, "knowledge_base_size": len(app.state.vector_store.get_all_chunks())}

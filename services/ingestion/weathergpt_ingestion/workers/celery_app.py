@@ -1,15 +1,18 @@
 import asyncio
+import logging
 
 from celery import Celery
 from redis.asyncio import Redis
 
 from ..config import get_settings
-from ..connectors import OpenMeteoConnector, Wis2MqttSubscriber
+from ..connectors import Wis2MqttSubscriber
 from ..kafka import WeatherEventProducer
-from ..models import DeadLetterEvent, IngestionRun, IngestionStatus, SourceName
-from ..normalizer import normalize_event
+from ..models import DeadLetterEvent, SourceName
 from ..repository import WeatherRepository
-from ..topics import WIS2_NOTIFICATION
+from ..service import IngestionService
+from ..topics import DLQ_WIS2, WIS2_NOTIFICATION
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -39,6 +42,13 @@ def run_wis2_mqtt_subscriber() -> str:
 
 
 async def _ingest_default_cities() -> list[dict[str, str]]:
+    """Poll Open-Meteo for all default cities and publish events to Kafka.
+
+    Delegates to IngestionService so run accounting, DLQ routing, and
+    normalization use the same code path as the HTTP API. This avoids the
+    previous bug where records_published was hardcoded to 2 regardless of
+    what was actually published.
+    """
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     producer = WeatherEventProducer(settings.kafka_bootstrap_servers)
     repository = WeatherRepository(
@@ -46,36 +56,20 @@ async def _ingest_default_cities() -> list[dict[str, str]]:
         min_size=settings.database_pool_min_size,
         max_size=settings.database_pool_max_size,
     )
-    connector = OpenMeteoConnector(settings, redis)
     await producer.start()
     await repository.start()
     results: list[dict[str, str]] = []
     try:
-        for city, coordinates in settings.default_cities.items():
-            run = IngestionRun(source=SourceName.OPEN_METEO, connector=connector.name)
-            await repository.start_run(run)
+        service = IngestionService(settings, redis, producer, repository)
+        for city in settings.default_cities:
             try:
-                event = await connector.fetch_current(city, coordinates[0], coordinates[1])
-                await producer.publish_raw(event)
-                observation = normalize_event(event)
-                await producer.publish_normalized(observation)
-                await repository.finish_run(run, IngestionStatus.SUCCEEDED, 1, 2)
-                results.append({"city": city, "status": "queued"})
+                result = await service.ingest_current(city, SourceName.OPEN_METEO)
+                results.append({"city": city, "status": result["status"]})
             except Exception as exc:
-                dlq_event = DeadLetterEvent(
-                    source=SourceName.OPEN_METEO.value,
-                    topic=connector.topic,
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                    payload={"city": city},
-                )
-                await producer.publish_dead_letter(dlq_event)
-                await repository.save_dead_letter(dlq_event)
-                await repository.finish_run(run, IngestionStatus.FAILED, 0, 0, str(exc))
+                logger.exception("ingest failed city=%s exc=%s", city, exc)
                 results.append({"city": city, "status": "failed"})
         return results
     finally:
-        await connector.close()
         await repository.close()
         await producer.stop()
         await redis.aclose()
@@ -99,7 +93,9 @@ async def _run_wis2_mqtt_subscriber() -> None:
         )
 
     def on_dead_letter(event: DeadLetterEvent) -> None:
-        asyncio.run_coroutine_threadsafe(producer.publish_dead_letter(event), loop)
+        asyncio.run_coroutine_threadsafe(
+            producer.publish_dead_letter(event, topic=DLQ_WIS2), loop
+        )
         asyncio.run_coroutine_threadsafe(repository.save_dead_letter(event), loop)
 
     try:

@@ -11,7 +11,7 @@ from ..config import Settings, get_settings
 from ..kafka import WeatherEventProducer
 from ..models import DeadLetterEvent, NormalizedObservation
 from ..repository import WeatherRepository
-from ..topics import NORMALIZED_OBSERVATION
+from ..topics import DLQ_NORMALIZED, NORMALIZED_OBSERVATION
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class ObservationWriter:
                     "raw_value": raw_value,
                 },
             )
-            await self.dlq_producer.publish_dead_letter(dlq_event)
+            await self.dlq_producer.publish_dead_letter(dlq_event, topic=DLQ_NORMALIZED)
             await self.repository.save_dead_letter(dlq_event)
             await self.consumer.commit(
                 {TopicPartition(record.topic, record.partition): record.offset + 1}

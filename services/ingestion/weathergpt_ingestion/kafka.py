@@ -1,4 +1,4 @@
-from aiokafka import AIOKafkaProducer
+﻿from aiokafka import AIOKafkaProducer
 
 from .models import DeadLetterEvent, NormalizedObservation, RawWeatherEvent
 from .resilience import stable_json
@@ -38,9 +38,21 @@ class WeatherEventProducer:
             value=event.model_dump(mode="json"),
         )
 
-    async def publish_dead_letter(self, event: DeadLetterEvent) -> None:
+    async def publish_dead_letter(
+        self,
+        event: DeadLetterEvent,
+        topic: str = INGESTION_DLQ,
+    ) -> None:
+        """Publish a dead-letter event to *topic*.
+
+        Each connector routes to its own DLQ topic so that malformed IMD,
+        NOAA, Open-Meteo, and WIS2 payloads are quarantined and inspectable
+        independently.  Pass the per-source DLQ constant from topics.py as
+        *topic*; the generic INGESTION_DLQ is the fallback for callers that
+        have not been updated yet.
+        """
         await self.producer.send_and_wait(
-            INGESTION_DLQ,
+            topic,
             key=f"{event.source}:{event.error_type}",
             value=event.model_dump(mode="json"),
         )

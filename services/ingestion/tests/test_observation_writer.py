@@ -19,16 +19,20 @@ class FakeProducer:
     def __init__(self) -> None:
         self.dead_letters = []
 
-    async def publish_dead_letter(self, event):
-        self.dead_letters.append(event)
+    async def publish_dead_letter(self, event, topic=None):
+        self.dead_letters.append((event, topic))
 
 
 class FakeRepository:
     def __init__(self) -> None:
         self.observations = []
+        self.dead_letters = []
 
     async def save_observation(self, observation):
         self.observations.append(observation)
+
+    async def save_dead_letter(self, event):
+        self.dead_letters.append(event)
 
 
 @pytest.fixture
@@ -89,7 +93,10 @@ async def test_malformed_record_goes_to_dlq_and_is_committed(valid_record):
 
     assert result == "dead_lettered"
     assert len(producer.dead_letters) == 1
-    assert producer.dead_letters[0].source == "kafka-normalized"
+    event, topic = producer.dead_letters[0]
+    assert event.source == "kafka-normalized"
+    assert topic == "weather.dlq.normalized.v1"
+    assert len(repository.dead_letters) == 1
     assert repository.observations == []
     committed = consumer.commits[0]
     assert next(iter(committed.values())) == 42

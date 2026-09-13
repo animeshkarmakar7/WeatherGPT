@@ -11,12 +11,36 @@ topics:
     partitions: 3
     replication_factor: 1
     retention_ms: 2592000000
+  - name: weather.raw.imd.current.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000
   - name: weather.raw.wis2.notification.v1
     partitions: 6
     replication_factor: 1
     retention_ms: 2592000000
   - name: weather.normalized.observation.v1
     partitions: 12
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.dlq.open_meteo.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.dlq.noaa.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.dlq.imd.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.dlq.wis2.v1
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 2592000000
+  - name: weather.dlq.normalized.v1
+    partitions: 3
     replication_factor: 1
     retention_ms: 2592000000
   - name: weather.dlq.ingestion.v1

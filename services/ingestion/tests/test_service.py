@@ -35,8 +35,8 @@ class FakeProducer:
     async def publish_normalized(self, observation):
         self.normalized.append(observation)
 
-    async def publish_dead_letter(self, event):
-        self.dead_letters.append(event)
+    async def publish_dead_letter(self, event, topic=None):
+        self.dead_letters.append((event, topic))
 
 
 class FakeRepository:

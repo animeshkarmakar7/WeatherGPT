@@ -1,4 +1,4 @@
-﻿import math
+import math
 from typing import Any
 from .models import DocumentChunk
 
@@ -39,3 +39,6 @@ class VectorStoreClient:
 
     def get_all_chunks(self) -> list[DocumentChunk]:
         return list(self._chunks.values())
+
+    def get_chunk_by_id(self, chunk_id: str) -> DocumentChunk | None:
+        return self._chunks.get(chunk_id)

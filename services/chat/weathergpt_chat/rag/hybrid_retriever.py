@@ -1,16 +1,105 @@
-﻿import re
+"""Hybrid BM25 + Dense retriever with Reciprocal Rank Fusion (RRF) and an
+optional cross-encoder reranker.
+
+Retrieval flow
+--------------
+1. Dense ANN search via the vector store (top-20).
+2. BM25 keyword search over all known chunks (top-20).
+3. RRF fusion of both ranked lists → combined candidate set.
+4. Recency decay and exact-token overlap bonus applied.
+5. Optional cross-encoder reranking of the top-K RRF candidates.
+
+Cross-encoder
+-------------
+Enabled when ``WEATHERGPT_USE_RERANKER=true``.  Requires ``FlagEmbedding``
+(``FlagReranker`` class, model ``BAAI/bge-reranker-v2-m3``).  Falls back to
+RRF scoring silently when the model or library is unavailable.
+"""
+
+import logging
+import os
+import re
 import math
 from rank_bm25 import BM25Okapi
 from .models import DocumentChunk, SearchResult
-from .embedding import BGEM3Embedder
+from .embedding import BGEM3Embedder, MockBGEM3Embedder, _RealBGEM3Embedder
 from .vector_store import VectorStoreClient
 
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Optional cross-encoder reranker
+# ---------------------------------------------------------------------------
+
+class _CrossEncoderReranker:
+    """Thin wrapper around FlagReranker (BGE-reranker-v2-m3).
+
+    Loads lazily so the process starts even without the model cached.
+    Falls back to identity (no-op) if loading fails.
+    """
+
+    def __init__(self) -> None:
+        self._model = None
+        self._failed = False
+
+    def _get_model(self):
+        if self._model is None and not self._failed:
+            try:
+                from FlagEmbedding import FlagReranker  # type: ignore[import]
+                model_name = os.getenv(
+                    "WEATHERGPT_RERANKER_MODEL_PATH", "BAAI/bge-reranker-v2-m3"
+                )
+                use_fp16 = os.getenv("WEATHERGPT_BGE_FP16", "true").lower() == "true"
+                logger.info("Loading cross-encoder reranker '%s'…", model_name)
+                self._model = FlagReranker(model_name, use_fp16=use_fp16)
+                logger.info("Cross-encoder reranker loaded successfully.")
+            except Exception as exc:
+                logger.warning(
+                    "Cross-encoder unavailable (%s). RRF scores will be used as-is.", exc
+                )
+                self._failed = True
+        return self._model
+
+    def rerank(
+        self, query: str, results: list[SearchResult]
+    ) -> list[SearchResult]:
+        model = self._get_model()
+        if model is None:
+            return results
+        pairs = [[query, r.chunk.content[:512]] for r in results]
+        try:
+            scores = model.compute_score(pairs, normalize=True)
+            for r, s in zip(results, scores):
+                r.rerank_score = float(s)
+            results.sort(key=lambda x: x.rerank_score, reverse=True)
+        except Exception as exc:
+            logger.warning("Cross-encoder scoring failed (%s); using RRF order.", exc)
+        return results
+
+
+_reranker: _CrossEncoderReranker | None = None
+
+
+def _get_reranker() -> _CrossEncoderReranker | None:
+    global _reranker
+    use_reranker = os.getenv("WEATHERGPT_USE_RERANKER", "false").lower() == "true"
+    if not use_reranker:
+        return None
+    if _reranker is None:
+        _reranker = _CrossEncoderReranker()
+    return _reranker
+
+
+# ---------------------------------------------------------------------------
+# HybridRetriever
+# ---------------------------------------------------------------------------
 
 class HybridRetriever:
     def __init__(
         self,
         vector_store: VectorStoreClient,
-        embedder: BGEM3Embedder,
+        embedder,
         rrf_k: int = 60,
     ) -> None:
         self.vector_store = vector_store
@@ -61,7 +150,17 @@ class HybridRetriever:
         q_tokens_set = set(self._tokenize(query))
 
         for cid in all_candidate_ids:
-            chunk = self.vector_store._chunks[cid]
+            # Use the public interface instead of accessing _chunks directly
+            chunk = self.vector_store.get_chunk_by_id(cid)
+            if chunk is None:
+                # Fallback: try to retrieve from dense/bm25 result lists
+                chunk = next(
+                    (c for c, _ in dense_results if c.chunk_id == cid),
+                    next((c for c, _ in bm25_results if c.chunk_id == cid), None),
+                )
+            if chunk is None:
+                continue
+
             d_rank = dense_ranks.get(cid, 100)
             b_rank = bm25_ranks.get(cid, 100)
 
@@ -94,4 +193,11 @@ class HybridRetriever:
             )
 
         combined.sort(key=lambda x: x.rerank_score, reverse=True)
-        return combined[:top_k]
+        top_candidates = combined[:top_k]
+
+        # Optional cross-encoder reranking
+        reranker = _get_reranker()
+        if reranker and top_candidates:
+            top_candidates = reranker.rerank(query, top_candidates)
+
+        return top_candidates

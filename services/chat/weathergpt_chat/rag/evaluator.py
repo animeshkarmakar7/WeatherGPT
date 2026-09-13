@@ -1,10 +1,13 @@
-﻿import re
+import logging
+import re
 from .models import DocumentChunk, DocumentType, EvalMetricResult
 from .chunker import DocumentChunker
 from .embedding import BGEM3Embedder
 from .vector_store import VectorStoreClient
 from .hybrid_retriever import HybridRetriever
 from .synthesizer import RAGSynthesizer
+
+logger = logging.getLogger(__name__)
 
 
 GOLDEN_BENCHMARK_DOCUMENTS = [
@@ -78,6 +81,68 @@ LABELED_EVALUATION_SET = [
 ]
 
 
+class LLMJudgeFaithfulness:
+    """Faithfulness judge that calls the vLLM endpoint for claim-level entailment.
+
+    For each (answer, context) pair it asks the LLM whether every claim in the
+    answer is supported by the retrieved context.  Falls back to keyword overlap
+    scoring when the LLM endpoint is unreachable or returns an unexpected result.
+    """
+
+    _PROMPT_TEMPLATE = (
+        "You are a strict factual judge. Given the CONTEXT and the ANSWER below, "
+        "score the faithfulness of the answer on a scale from 0.0 to 1.0 where:\n"
+        "  1.0 = every claim in the answer is fully supported by the context.\n"
+        "  0.0 = the answer contains major hallucinations not present in the context.\n\n"
+        "CONTEXT:\n{context}\n\nANSWER:\n{answer}\n\n"
+        "Reply with ONLY a single decimal number between 0.0 and 1.0. No explanation."
+    )
+
+    def __init__(self, llm_base_url: str = "http://localhost:8000/v1") -> None:
+        self.llm_base_url = llm_base_url.rstrip("/")
+        self._available: bool | None = None  # None = not yet tested
+
+    def _is_available(self) -> bool:
+        if self._available is not None:
+            return self._available
+        try:
+            import httpx
+            resp = httpx.get(f"{self.llm_base_url}/models", timeout=2.0)
+            self._available = resp.status_code == 200
+        except Exception:
+            self._available = False
+        return self._available
+
+    def score(self, answer: str, context: str, key_phrases: list[str]) -> float:
+        if not self._is_available():
+            return self._keyword_fallback(answer, key_phrases)
+        try:
+            import httpx
+            prompt = self._PROMPT_TEMPLATE.format(context=context[:2000], answer=answer[:1000])
+            resp = httpx.post(
+                f"{self.llm_base_url}/completions",
+                json={
+                    "prompt": prompt,
+                    "max_tokens": 8,
+                    "temperature": 0.0,
+                    "stop": ["\n"],
+                },
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                raw = resp.json()["choices"][0]["text"].strip()
+                return max(0.0, min(1.0, float(raw)))
+        except Exception as exc:
+            logger.warning("LLM faithfulness judge failed (%s); using keyword fallback.", exc)
+        return self._keyword_fallback(answer, key_phrases)
+
+    @staticmethod
+    def _keyword_fallback(answer: str, key_phrases: list[str]) -> float:
+        ans_lower = answer.lower()
+        matched = sum(1 for kp in key_phrases if kp.lower() in ans_lower)
+        return matched / max(1, len(key_phrases))
+
+
 class RAGEvaluator:
     def __init__(
         self,
@@ -85,6 +150,7 @@ class RAGEvaluator:
         threshold_faithfulness: float = 0.85,
         threshold_answer_relevance: float = 0.80,
         threshold_umbrela: float = 0.80,
+        llm_base_url: str = "http://localhost:8000/v1",
     ) -> None:
         self.thresh_cr = threshold_context_relevance
         self.thresh_f = threshold_faithfulness
@@ -95,6 +161,7 @@ class RAGEvaluator:
         self.vector_store = VectorStoreClient()
         self.retriever = HybridRetriever(self.vector_store, self.embedder)
         self.synthesizer = RAGSynthesizer(self.retriever)
+        self.llm_judge = LLMJudgeFaithfulness(llm_base_url=llm_base_url)
 
     def setup_benchmark_corpus(self) -> int:
         all_chunks: list[DocumentChunk] = []
@@ -160,14 +227,12 @@ class RAGEvaluator:
 
             response = self.synthesizer.answer_query(q, top_k=2)
 
-            ans_lower = response.answer.lower()
-            grounded_claims = 0
-            for kp in expected:
-                if kp.lower() in ans_lower:
-                    grounded_claims += 1
-            faithfulness = grounded_claims / max(1, len(expected))
+            # Gather retrieved context text for the LLM judge
+            context_text = "\n\n".join(r.chunk.content for r in retrievals)
+            faithfulness = self.llm_judge.score(response.answer, context_text, expected)
             f_scores.append(faithfulness)
 
+            ans_lower = response.answer.lower()
             q_words = set(re.findall(r"\w+", q.lower()))
             ans_words = set(re.findall(r"\w+", ans_lower))
             overlap = len(q_words & ans_words)

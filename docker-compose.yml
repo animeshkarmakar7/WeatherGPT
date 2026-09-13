@@ -214,6 +214,8 @@ services:
       WEATHERGPT_SERVICE_PORT: 8082
       WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
       WEATHERGPT_REDIS_URL: redis://redis:6379/0
+      WEATHERGPT_MINIO_ENDPOINT: minio:9000
+      WEATHERGPT_QDRANT_URL: http://qdrant:6333
       WEATHERGPT_LLM_BASE_URL: http://vllm:8000/v1
     ports:
       - "8082:8082"
@@ -222,6 +224,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_started
+      qdrant:
+        condition: service_started
     restart: unless-stopped
 
   frontend:

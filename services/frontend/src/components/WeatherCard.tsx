@@ -1,4 +1,4 @@
-﻿import React from "react";
+import React from "react";
 import type { StructuredWeatherData } from "../types";
 import { CloudRain, Sun, Wind, Droplets, ShieldCheck, Thermometer } from "lucide-react";
 
@@ -7,6 +7,23 @@ interface Props {
 }
 
 export const WeatherCard: React.FC<Props> = ({ data }) => {
+  const formatTemp = () => {
+    const hasRange =
+      data.temp_min_c != null &&
+      data.temp_max_c != null &&
+      data.temp_min_c !== data.temp_max_c;
+    if (hasRange) return `${data.temp_min_c}° – ${data.temp_max_c}°C`;
+    const single = data.temp_c ?? data.temp_min_c ?? data.temp_max_c;
+    return single != null ? `${single}°C` : "N/A";
+  };
+
+  const formatDateLabel = (raw: string) => {
+    const lower = raw.toLowerCase();
+    if (lower === "today" || lower === "current" || lower === "now") return "Today";
+    if (lower === "tomorrow") return "Tomorrow";
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+  };
+
   return (
     <div style={{
       background: "linear-gradient(135deg, #1e293b 0%, #0f172a 100%)",
@@ -24,7 +41,7 @@ export const WeatherCard: React.FC<Props> = ({ data }) => {
             {data.location}
           </h3>
           <span style={{ fontSize: "0.85rem", color: "#94a3b8", textTransform: "capitalize" }}>
-            Forecast for {data.target_date}
+            Forecast For {formatDateLabel(data.target_date)}
           </span>
         </div>
         <div style={{
@@ -50,9 +67,7 @@ export const WeatherCard: React.FC<Props> = ({ data }) => {
             <Thermometer size={14} color="#f87171" /> Temperature
           </div>
           <div style={{ fontSize: "1.3rem", fontWeight: 700, marginTop: "4px" }}>
-            {data.temp_min_c !== undefined && data.temp_max_c !== undefined
-              ? `${data.temp_min_c}° - ${data.temp_max_c}°C`
-              : `${data.temp_c ?? 25}°C`}
+            {formatTemp()}
           </div>
         </div>
 
@@ -61,11 +76,11 @@ export const WeatherCard: React.FC<Props> = ({ data }) => {
             <Droplets size={14} color="#60a5fa" /> Rain Probability
           </div>
           <div style={{ fontSize: "1.3rem", fontWeight: 700, marginTop: "4px", color: "#60a5fa" }}>
-            {data.precipitation_probability_pct ?? (data.will_rain ? 70 : 15)}%
+            {data.precipitation_probability_pct ?? (data.will_rain ? 70 : 10)}%
           </div>
         </div>
 
-        {data.wind_speed_kph !== undefined && (
+        {data.wind_speed_kph != null && (
           <div style={{ background: "rgba(255, 255, 255, 0.05)", padding: "12px", borderRadius: "12px" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "8px", color: "#94a3b8", fontSize: "0.8rem" }}>
               <Wind size={14} color="#34d399" /> Wind

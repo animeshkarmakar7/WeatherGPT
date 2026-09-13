@@ -1,5 +1,6 @@
-﻿import json
+import json
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 import httpx
@@ -13,14 +14,45 @@ from .models import WeatherDataFact
 
 logger = logging.getLogger(__name__)
 
+# WMO Weather Interpretation Codes (WW codes) — subset covering common cases.
+# Full table: https://open-meteo.com/en/docs#weathervariables
+_WMO_CONDITIONS: dict[int, str] = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Foggy",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    71: "Slight snowfall",
+    73: "Moderate snowfall",
+    75: "Heavy snowfall",
+    77: "Snow grains",
+    80: "Slight rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    85: "Slight snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
+}
+
+
+def _wmo_to_condition(code: str | int, will_rain: bool) -> str:
+    """Return a human-readable condition string from a WMO weather code."""
+    try:
+        return _WMO_CONDITIONS.get(int(code), "Partly cloudy")
+    except (ValueError, TypeError):
+        return "Rain showers" if will_rain else "Partly cloudy"
+
 
 class WeatherDataQueryService:
-    """CQRS Read-Model Service for Weather Data.
-
-    Reads exclusively from TimescaleDB (and secondary read caches in Redis).
-    Never triggers or touches ingestion write paths.
-    """
-
     def __init__(self, settings: ChatSettings, redis: Redis | None = None) -> None:
         self.settings = settings
         self.redis = redis
@@ -47,11 +79,39 @@ class WeatherDataQueryService:
         except Exception:
             return False
 
+    async def _resolve_coordinates(self, location: str) -> tuple[float, float, str]:
+        norm = location.strip().lower()
+        if norm in self.settings.default_cities:
+            lat, lon = self.settings.default_cities[norm]
+            return lat, lon, norm
+
+        search_tokens = re.findall(r"\w+", norm)
+        candidate_names = [norm] + search_tokens
+
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            for name in candidate_names:
+                if len(name) < 3:
+                    continue
+                try:
+                    resp = await client.get(
+                        "https://geocoding-api.open-meteo.com/v1/search",
+                        params={"name": name, "count": 1},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        results = data.get("results")
+                        if results and len(results) > 0:
+                            item = results[0]
+                            return float(item["latitude"]), float(item["longitude"]), item.get("name", location)
+                except Exception:
+                    pass
+
+        return 18.5204, 73.8567, location
+
     async def get_weather_data(self, location: str, target_date: str = "tomorrow") -> WeatherDataFact:
         norm_loc = location.strip().lower()
         cache_key = f"weather:read:{norm_loc}:{target_date}"
-        
-        # 1. Check Redis Cache
+
         if self.redis:
             try:
                 cached_json = await self.redis.get(cache_key)
@@ -62,11 +122,9 @@ class WeatherDataQueryService:
             except Exception as e:
                 logger.warning("Redis cache read failed: %s", e)
 
-        # 2. Query TimescaleDB Read Hypertable
-        coords = self.settings.default_cities.get(norm_loc, (18.5204, 73.8567))
-        fact = await self._query_timescaledb(norm_loc, coords, target_date)
+        lat, lon, resolved_name = await self._resolve_coordinates(norm_loc)
+        fact = await self._query_timescaledb(resolved_name, (lat, lon), target_date)
 
-        # 3. Cache Result in Redis
         if self.redis and fact:
             try:
                 await self.redis.setex(
@@ -88,30 +146,31 @@ class WeatherDataQueryService:
         try:
             async with self.pool.connection() as conn:
                 conn.row_factory = dict_row
-                # Fetch most recent observation for location
                 cur = await conn.execute(
                     """
                     SELECT *
                     FROM weather_observations
-                    WHERE location_name = %(location)s
+                    WHERE location_name ILIKE %(location)s
                     ORDER BY observed_at DESC
                     LIMIT 1
                     """,
-                    {"location": location},
+                    {"location": f"%{location.lower()}%"},
                 )
                 db_record = await cur.fetchone()
         except Exception as exc:
             logger.warning("TimescaleDB query failed (fallback to live API query): %s", exc)
 
         if db_record and target_date in ("today", "current", "now"):
-            # Format from DB observation
             precip = db_record.get("precipitation_mm") or 0.0
+            temp = db_record.get("temp_c")
             return WeatherDataFact(
                 location=location,
                 latitude=lat,
                 longitude=lon,
                 target_date=target_date,
-                temp_c=db_record.get("temp_c"),
+                temp_c=temp,
+                temp_min_c=temp,
+                temp_max_c=temp,
                 humidity_pct=db_record.get("humidity_pct"),
                 precipitation_mm=precip,
                 precipitation_probability_pct=min(100.0, precip * 25.0) if precip > 0 else 10.0,
@@ -122,8 +181,6 @@ class WeatherDataQueryService:
                 source="timescaledb",
             )
 
-        # For "tomorrow" / future forecast or when DB has not populated yet,
-        # fetch forecast data from Open-Meteo as the forecast read provider
         return await self._fetch_openmeteo_forecast(location, lat, lon, target_date)
 
     async def _fetch_openmeteo_forecast(
@@ -137,14 +194,15 @@ class WeatherDataQueryService:
                         "latitude": lat,
                         "longitude": lon,
                         "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,weather_code,wind_speed_10m_max",
+                        "current": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m",
                         "timezone": "auto",
                     },
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 daily = data.get("daily", {})
-                
-                # Default to index 1 (tomorrow) or 0 (today)
+                current = data.get("current", {})
+
                 idx = 1 if target_date == "tomorrow" else 0
                 dates = daily.get("time", [])
                 if len(dates) <= idx:
@@ -157,8 +215,11 @@ class WeatherDataQueryService:
                 wind = daily.get("wind_speed_10m_max", [12.0])[idx]
                 wcode = str(daily.get("weather_code", [1])[idx])
 
+                curr_temp = current.get("temperature_2m")
+                avg_temp = curr_temp if (target_date in ("today", "current", "now") and curr_temp is not None) else round((temp_min + temp_max) / 2.0, 1)
+
                 will_rain = bool((precip and precip > 1.0) or (precip_prob and precip_prob >= 50.0))
-                condition = "Rain showers" if will_rain else "Sunny with clear intervals"
+                condition = _wmo_to_condition(wcode, will_rain)
 
                 return WeatherDataFact(
                     location=location,
@@ -167,7 +228,7 @@ class WeatherDataQueryService:
                     target_date=target_date,
                     temp_min_c=temp_min,
                     temp_max_c=temp_max,
-                    temp_c=round((temp_min + temp_max) / 2.0, 1),
+                    temp_c=avg_temp,
                     precipitation_mm=precip,
                     precipitation_probability_pct=float(precip_prob or 0.0),
                     wind_speed_kph=wind,
@@ -178,7 +239,6 @@ class WeatherDataQueryService:
                 )
             except Exception as e:
                 logger.error("Forecast API fallback failed: %s", e)
-                # Deterministic baseline guarantee for tests / offline
                 return WeatherDataFact(
                     location=location,
                     latitude=lat,

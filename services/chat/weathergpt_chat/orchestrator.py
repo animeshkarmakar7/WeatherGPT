@@ -1,4 +1,5 @@
-﻿import logging
+import re
+import logging
 from typing import Annotated, TypedDict
 from langgraph.graph import StateGraph, END
 
@@ -32,7 +33,8 @@ def create_weather_orchestrator(
     rag_synthesizer: RAGSynthesizer | None = None,
 ):
     async def query_classifier_node(state: AgentState) -> dict:
-        msg = state["user_message"].lower()
+        raw_msg = state["user_message"]
+        msg = raw_msg.lower()
 
         advisory_keywords = [
             "sop",
@@ -59,11 +61,22 @@ def create_weather_orchestrator(
                 )
             }
 
-        location = "pune"
-        for city in ["pune", "mumbai", "delhi", "kolkata", "chennai", "bengaluru"]:
+        known_cities = ["pune", "mumbai", "delhi", "kolkata", "chennai", "bengaluru"]
+        detected_location = None
+        for city in known_cities:
             if city in msg:
-                location = city
+                detected_location = city
                 break
+
+        if not detected_location:
+            m = re.search(r"(?:in|of|at|for)\s+([a-zA-Z\s]{3,30})", raw_msg, re.IGNORECASE)
+            if m:
+                cand = m.group(1).strip()
+                cand = re.split(r"\s+(?:tomorrow|today|now|right now|yesterday|this|next)", cand, flags=re.IGNORECASE)[0].strip()
+                if len(cand) >= 3:
+                    detected_location = cand
+
+        location = detected_location or "pune"
 
         target_date = "tomorrow" if "tomorrow" in msg else "today"
         aspect = WeatherAspect.GENERAL
@@ -123,8 +136,11 @@ def create_weather_orchestrator(
             else f"No significant rain is expected in {fact.location.capitalize()} {fact.target_date}."
         )
 
+        t_min = fact.temp_min_c if fact.temp_min_c is not None else fact.temp_c
+        t_max = fact.temp_max_c if fact.temp_max_c is not None else fact.temp_c
+
         details = []
-        if fact.temp_min_c is not None and fact.temp_max_c is not None:
+        if fact.temp_min_c is not None and fact.temp_max_c is not None and fact.temp_min_c != fact.temp_max_c:
             details.append(f"temperatures between {fact.temp_min_c}°C and {fact.temp_max_c}°C")
         elif fact.temp_c is not None:
             details.append(f"temperature around {fact.temp_c}°C")
@@ -145,8 +161,8 @@ def create_weather_orchestrator(
             will_rain=fact.will_rain,
             precipitation_probability_pct=fact.precipitation_probability_pct,
             temp_c=fact.temp_c,
-            temp_min_c=fact.temp_min_c,
-            temp_max_c=fact.temp_max_c,
+            temp_min_c=t_min,
+            temp_max_c=t_max,
             humidity_pct=fact.humidity_pct,
             wind_speed_kph=fact.wind_speed_kph,
             conditions=fact.condition_description,

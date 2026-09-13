@@ -1,4 +1,4 @@
-﻿import re
+import re
 from uuid import uuid4
 from .models import DocumentChunk, DocumentType
 
@@ -22,7 +22,7 @@ class DocumentChunker:
             return self._chunk_faq(doc_id, doc_name, text, region, language, doc_date)
         elif doc_type == DocumentType.CLIMATE_REPORT:
             return self._chunk_climate_report(doc_id, doc_name, text, region, language, doc_date)
-        return self._chunk_generic(doc_id, doc_name, text, region, language, doc_date)
+        return self._chunk_generic(doc_id, doc_name, doc_type, text, region, language, doc_date)
 
     def _chunk_sop(
         self, doc_id: str, doc_name: str, text: str, region: str, language: str, doc_date: str
@@ -129,7 +129,7 @@ class DocumentChunker:
         return chunks
 
     def _chunk_generic(
-        self, doc_id: str, doc_name: str, text: str, region: str, language: str, doc_date: str
+        self, doc_id: str, doc_name: str, doc_type: DocumentType, text: str, region: str, language: str, doc_date: str
     ) -> list[DocumentChunk]:
         paragraphs = self._sliding_window_tokens(text, max_tokens=500, overlap_tokens=50)
         chunks: list[DocumentChunk] = []
@@ -139,7 +139,7 @@ class DocumentChunker:
                     chunk_id=f"{doc_id}-gen-{idx}",
                     doc_id=doc_id,
                     doc_name=doc_name,
-                    doc_type=DocumentType.GOVERNMENT_SOP,
+                    doc_type=doc_type,
                     content=p,
                     page_number=1,
                     section_title="General Guidance",

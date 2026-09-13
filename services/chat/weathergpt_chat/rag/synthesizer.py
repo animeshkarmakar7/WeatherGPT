@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any
@@ -20,7 +21,7 @@ class RAGSynthesizer:
         self.min_confidence = min_confidence
 
     async def answer_query(self, query: str, top_k: int = 5, filters: dict[str, Any] | None = None) -> RAGResponse:
-        results = self.retriever.retrieve(query, top_k=top_k, filters=filters)
+        results = await asyncio.to_thread(self.retriever.retrieve, query, top_k, filters)
         if not results or results[0].rerank_score < self.min_confidence:
             return RAGResponse(query=query, answer="I do not have enough verified official evidence to answer that question.", citations=[], confidence=0.0, retrieval_success=False)
 
@@ -32,16 +33,7 @@ class RAGSynthesizer:
             evidence.append({"evidence_id": index, "doc_name": chunk.doc_name, "page": chunk.page_number, "section": chunk.section_title, "content": chunk.content})
 
         system_prompt = "You are WeatherGPT's grounded official-information assistant. Answer only from supplied evidence. Do not add unsupported facts. Do not invent dates, thresholds, procedures, locations, or policy claims. If evidence is insufficient, say so."
-        schema = {
-            "type": "object",
-            "properties": {
-                "answer": {"type": "string"},
-                "evidence_ids": {"type": "array", "items": {"type": "integer"}},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            },
-            "required": ["answer", "evidence_ids", "confidence"],
-            "additionalProperties": False,
-        }
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}, "evidence_ids": {"type": "array", "items": {"type": "integer"}}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}, "required": ["answer", "evidence_ids", "confidence"], "additionalProperties": False}
         payload = {
             "model": self.llm_model,
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"QUESTION:\n{query}\n\nEVIDENCE:\n{json.dumps(evidence, ensure_ascii=False)}"}],
@@ -56,14 +48,12 @@ class RAGSynthesizer:
                 content = response.json()["choices"][0]["message"]["content"]
                 generated = json.loads(content)
                 answer = str(generated["answer"]).strip()
-                evidence_ids = generated["evidence_ids"]
+                evidence_ids = [int(value) for value in generated["evidence_ids"]]
                 confidence = float(generated["confidence"])
                 valid_ids = set(range(1, len(results) + 1))
                 if not answer or not evidence_ids or not set(evidence_ids).issubset(valid_ids):
                     raise ValueError("LLM returned an invalid grounded response")
-                selected = [citations[index - 1] for index in evidence_ids if isinstance(index, int) and 1 <= index <= len(citations)]
-                if not selected:
-                    raise ValueError("LLM returned no valid citation binding")
+                selected = [citations[index - 1] for index in evidence_ids]
                 return RAGResponse(query=query, answer=answer, citations=selected, confidence=max(0.0, min(1.0, confidence)), retrieval_success=True)
         except Exception as exc:
             logger.error("Grounded RAG generation failed: %s", exc)

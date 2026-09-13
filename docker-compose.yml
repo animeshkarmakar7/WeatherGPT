@@ -102,6 +102,11 @@ services:
       - "6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
     restart: unless-stopped
 
   ingestion-api:
@@ -213,10 +218,26 @@ services:
     environment:
       WEATHERGPT_SERVICE_PORT: 8082
       WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
+      WEATHERGPT_DATABASE_POOL_MIN_SIZE: 2
+      WEATHERGPT_DATABASE_POOL_MAX_SIZE: 10
       WEATHERGPT_REDIS_URL: redis://redis:6379/0
       WEATHERGPT_MINIO_ENDPOINT: minio:9000
+      WEATHERGPT_MINIO_ACCESS_KEY: weathergpt
+      WEATHERGPT_MINIO_SECRET_KEY: weathergpt-secret
       WEATHERGPT_QDRANT_URL: http://qdrant:6333
-      WEATHERGPT_LLM_BASE_URL: http://vllm:8000/v1
+      WEATHERGPT_QDRANT_COLLECTION: weathergpt_knowledge_base
+      WEATHERGPT_USE_QDRANT: "true"
+      WEATHERGPT_USE_REAL_EMBEDDER: "true"
+      WEATHERGPT_BGE_MODEL_PATH: BAAI/bge-m3
+      WEATHERGPT_BGE_FP16: "false"
+      WEATHERGPT_USE_RERANKER: "true"
+      WEATHERGPT_RERANKER_MODEL_PATH: BAAI/bge-reranker-v2-m3
+      WEATHERGPT_RERANKER_FP16: "false"
+      WEATHERGPT_LLM_BASE_URL: ${WEATHERGPT_LLM_BASE_URL:-http://host.docker.internal:8000/v1}
+      WEATHERGPT_LLM_API_KEY: ${WEATHERGPT_LLM_API_KEY:-dummy-vllm-key}
+      WEATHERGPT_LLM_MODEL: ${WEATHERGPT_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      WEATHERGPT_LLM_TIMEOUT_SECONDS: 30
+      WEATHERGPT_RAG_MIN_SCORE: 0.015
     ports:
       - "8082:8082"
     depends_on:
@@ -227,7 +248,7 @@ services:
       minio:
         condition: service_started
       qdrant:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:

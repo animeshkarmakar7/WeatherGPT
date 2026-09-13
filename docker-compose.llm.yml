@@ -1,0 +1,35 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    ipc: host
+    ports:
+      - "8000:8000"
+    environment:
+      VLLM_API_KEY: ${WEATHERGPT_LLM_API_KEY:-dummy-vllm-key}
+      HF_HOME: /root/.cache/huggingface
+    command:
+      - --model
+      - ${WEATHERGPT_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --api-key
+      - ${WEATHERGPT_LLM_API_KEY:-dummy-vllm-key}
+      - --generation-config
+      - vllm
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+  chat-service:
+    environment:
+      WEATHERGPT_LLM_BASE_URL: http://vllm:8000/v1
+      WEATHERGPT_LLM_API_KEY: ${WEATHERGPT_LLM_API_KEY:-dummy-vllm-key}
+      WEATHERGPT_LLM_MODEL: ${WEATHERGPT_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+    depends_on:
+      vllm:
+        condition: service_started
+
+volumes:
+  hf-cache:

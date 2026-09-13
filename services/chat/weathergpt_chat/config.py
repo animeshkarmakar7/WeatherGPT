@@ -1,5 +1,5 @@
 from functools import lru_cache
-from pydantic import AnyHttpUrl, Field, PositiveInt
+from pydantic import Field, PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,8 @@ class ChatSettings(BaseSettings):
     database_pool_max_size: PositiveInt = 10
     redis_url: str = "redis://localhost:6379/0"
     session_ttl_seconds: int = 86400
-    weather_cache_ttl_seconds: int = 600
+    weather_cache_ttl_seconds: int = 300
+    weather_freshness_seconds: int = 900
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "weathergpt"
@@ -23,30 +24,35 @@ class ChatSettings(BaseSettings):
     minio_bucket: str = "weathergpt-documents"
 
     qdrant_url: str = "http://localhost:6333"
-    # Set WEATHERGPT_USE_QDRANT=true to activate Qdrant-backed vector store.
-    # Defaults to in-memory for tests and lightweight local runs.
-    use_qdrant: bool = False
+    qdrant_collection: str = "weathergpt_knowledge_base"
+    qdrant_eval_collection: str = "weathergpt_eval_v1"
+    use_qdrant: bool = True
 
-    llm_base_url: str = "http://localhost:8000/v1"
+    llm_base_url: str = "http://vllm:8000/v1"
     llm_api_key: str = "dummy-vllm-key"
-    llm_model: str = "meta-llama/Meta-Llama-3-8B-Instruct"
-    llm_temperature: float = 0.1
-    llm_timeout_seconds: float = 15.0
+    llm_model: str = "Qwen/Qwen2.5-7B-Instruct"
+    llm_temperature: float = 0.0
+    llm_timeout_seconds: float = 30.0
 
-    # Set WEATHERGPT_USE_REAL_EMBEDDER=true to load actual BAAI/BGE-M3.
-    # Requires FlagEmbedding installed and a GPU/large-CPU instance.
-    use_real_embedder: bool = False
+    use_real_embedder: bool = True
+    bge_model_path: str = "BAAI/bge-m3"
+    bge_fp16: bool = False
+    reranker_model_path: str = "BAAI/bge-reranker-v2-m3"
+    use_reranker: bool = True
+    reranker_fp16: bool = False
+
+    rag_top_k: int = 5
+    rag_candidate_k: int = 20
+    rag_min_score: float = 0.015
 
     default_cities: dict[str, tuple[float, float]] = Field(
         default_factory=lambda: {
-            # Tier-1
             "pune": (18.5204, 73.8567),
             "mumbai": (19.0760, 72.8777),
             "delhi": (28.6139, 77.2090),
             "kolkata": (22.5726, 88.3639),
             "chennai": (13.0827, 80.2707),
             "bengaluru": (12.9716, 77.5946),
-            # Tier-2
             "nagpur": (21.1458, 79.0882),
             "hyderabad": (17.3850, 78.4867),
             "ahmedabad": (23.0225, 72.5714),
@@ -72,4 +78,3 @@ class ChatSettings(BaseSettings):
 @lru_cache
 def get_chat_settings() -> ChatSettings:
     return ChatSettings()
-

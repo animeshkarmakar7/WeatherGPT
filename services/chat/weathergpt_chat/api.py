@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.5.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.get("/health")
@@ -88,7 +88,10 @@ async def ready() -> dict[str, object]:
 async def handle_message(req: ChatMessageRequest) -> ChatMessageResponse:
     session_id = req.session_id or str(uuid4())
     await app.state.session_store.add_message(session_id, "user", req.message)
-    result = await app.state.orchestrator.ainvoke({"user_message": req.message, "session_id": session_id, "classification": None, "weather_fact": None, "rag_response": None, "structured_response": None, "final_text": None})
+    try:
+        result = await app.state.orchestrator.ainvoke({"user_message": req.message, "session_id": session_id, "classification": None, "weather_fact": None, "rag_response": None, "structured_response": None, "final_text": None})
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     response_text = result.get("final_text") or "No verified answer is available for this request."
     structured = result.get("structured_response")
     intent = result["classification"].intent if result.get("classification") else IntentType.WEATHER_CURRENT

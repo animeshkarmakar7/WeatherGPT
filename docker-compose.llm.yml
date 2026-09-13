@@ -20,6 +20,12 @@ services:
       - vllm
     volumes:
       - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
     deploy:
       resources:
         reservations:
@@ -36,7 +42,7 @@ services:
       WEATHERGPT_LLM_MODEL: ${WEATHERGPT_LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
     depends_on:
       vllm:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   hf-cache:

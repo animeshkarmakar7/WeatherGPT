@@ -198,6 +198,32 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  chat-service:
+    build:
+      context: ./services/chat
+    environment:
+      WEATHERGPT_SERVICE_PORT: 8082
+      WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
+      WEATHERGPT_REDIS_URL: redis://redis:6379/0
+      WEATHERGPT_LLM_BASE_URL: http://vllm:8000/v1
+    ports:
+      - "8082:8082"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./services/frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - chat-service
+    restart: unless-stopped
+
 volumes:
   timescale-data:
   minio-data:

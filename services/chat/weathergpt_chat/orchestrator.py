@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import TypedDict
@@ -35,7 +36,9 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
             match = re.search(r"(?:in|of|at|for)\s+([a-zA-Z\s]{3,40})", raw_msg, re.IGNORECASE)
             if match:
                 detected_location = re.split(r"\s+(?:tomorrow|today|now|right now|yesterday|this|next)\b", match.group(1).strip(), flags=re.IGNORECASE)[0].strip()
-        location = detected_location or "pune"
+        location = detected_location
+        if not location:
+            raise ValueError("A weather location is required")
         target_date = "tomorrow" if "tomorrow" in msg else "current"
         aspect = WeatherAspect.GENERAL
         if any(k in msg for k in ["rain", "precipitation", "shower"]):
@@ -52,7 +55,7 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
 
     async def weather_agent_node(state: AgentState) -> dict:
         classification = state["classification"]
-        fact = await query_service.get_weather_data(location=classification.location or "pune", target_date=classification.target_date or "current")
+        fact = await query_service.get_weather_data(location=classification.location or "", target_date=classification.target_date or "current")
         return {"weather_fact": fact}
 
     async def rag_agent_node(state: AgentState) -> dict:
@@ -63,25 +66,50 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
     async def response_synthesis_node(state: AgentState) -> dict:
         rag_resp = state.get("rag_response")
         if rag_resp is not None:
-            return {"final_text": rag_resp.answer if rag_resp.retrieval_success else rag_resp.answer, "structured_response": None}
+            return {"final_text": rag_resp.answer, "structured_response": None}
+
         fact = state.get("weather_fact")
-        if fact is None:
+        if fact is None or getattr(fact, "source", "") == "unavailable":
             return {"final_text": "Verified weather data is unavailable for this request.", "structured_response": None}
-        structured = StructuredWeatherResponse(
-            location=fact.location.capitalize(),
-            target_date=fact.target_date,
-            summary=(f"Current temperature in {fact.location.capitalize()} is {fact.temp_c}°C." if fact.target_date in ("current", "today", "now") else f"For {fact.location.capitalize()} {fact.target_date}, temperatures are expected between {fact.temp_min_c}°C and {fact.temp_max_c}°C."),
-            will_rain=fact.will_rain,
-            precipitation_probability_pct=fact.precipitation_probability_pct,
-            temp_c=fact.temp_c,
-            temp_min_c=fact.temp_min_c,
-            temp_max_c=fact.temp_max_c,
-            humidity_pct=fact.humidity_pct,
-            wind_speed_kph=fact.wind_speed_kph,
-            conditions=fact.condition_description,
-            confidence=0.0 if fact.source == "unavailable" else 0.95,
-            data_sources=[fact.source],
+
+        fact_payload = {
+            "location": fact.location,
+            "target_date": fact.target_date,
+            "latitude": fact.latitude,
+            "longitude": fact.longitude,
+            "temperature_c": fact.temp_c,
+            "temperature_min_c": fact.temp_min_c,
+            "temperature_max_c": fact.temp_max_c,
+            "humidity_pct": fact.humidity_pct,
+            "precipitation_mm": fact.precipitation_mm,
+            "precipitation_probability_pct": fact.precipitation_probability_pct,
+            "wind_speed_kph": fact.wind_speed_kph,
+            "weather_code": fact.weather_code,
+            "condition": fact.condition_description,
+            "will_rain": fact.will_rain,
+            "source": fact.source,
+        }
+        prompt = (
+            "Generate a concise weather response using only the supplied weather facts. "
+            "Do not change or invent any numeric value. Preserve null values as null. "
+            "State clearly whether the data is current or a forecast. "
+            "Set confidence to a value between 0 and 1 based only on the completeness of the supplied facts. "
+            "Never claim a source that is not in the supplied facts.\n\n"
+            f"FACTS:\n{json.dumps(fact_payload, ensure_ascii=False)}"
         )
+        system_prompt = (
+            "You are WeatherGPT. You are a grounded weather answer generator. "
+            "The supplied facts are authoritative for this response. "
+            "You must not fabricate, extrapolate, or estimate measurements. "
+            "Return a valid StructuredWeatherResponse JSON object."
+        )
+        try:
+            structured = await llm_client.generate_structured(prompt, system_prompt, StructuredWeatherResponse)
+        except RuntimeError:
+            return {"final_text": "The language model is unavailable. Verified weather data was retrieved but no generated answer can be returned.", "structured_response": None}
+        if structured.location.lower() != fact.location.lower():
+            return {"final_text": "The generated weather response failed validation and was withheld.", "structured_response": None}
+        structured.data_sources = [fact.source]
         return {"structured_response": structured, "final_text": structured.summary}
 
     workflow = StateGraph(AgentState)

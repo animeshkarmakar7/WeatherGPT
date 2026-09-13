@@ -11,6 +11,7 @@ from .models import (
 )
 from .query_service import WeatherDataQueryService
 from .llm_client import LLMClient
+from .rag import HybridRetriever, RAGResponse, RAGSynthesizer
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class AgentState(TypedDict):
     session_id: str
     classification: QueryClassification | None
     weather_fact: WeatherDataFact | None
+    rag_response: RAGResponse | None
     structured_response: StructuredWeatherResponse | None
     final_text: str | None
 
@@ -27,20 +29,42 @@ class AgentState(TypedDict):
 def create_weather_orchestrator(
     query_service: WeatherDataQueryService,
     llm_client: LLMClient,
+    rag_synthesizer: RAGSynthesizer | None = None,
 ):
-    """Build the LangGraph multi-agent orchestrator matching Blueprint Section 2.4 & 4."""
-
-    # 1. Query Classifier Node
     async def query_classifier_node(state: AgentState) -> dict:
         msg = state["user_message"].lower()
-        
-        # Fast rule-based heuristics (<5ms)
-        location = "pune"  # Default
+
+        advisory_keywords = [
+            "sop",
+            "evacuat",
+            "cyclone alert",
+            "heatwave",
+            "guideline",
+            "regulation",
+            "policy",
+            "danger level",
+            "warning stage",
+            "warning level",
+            "shelter",
+            "protocol",
+        ]
+        if any(k in msg for k in advisory_keywords):
+            return {
+                "classification": QueryClassification(
+                    intent=IntentType.ALERT,
+                    location=None,
+                    target_date="current",
+                    aspect=WeatherAspect.GENERAL,
+                    confidence=0.98,
+                )
+            }
+
+        location = "pune"
         for city in ["pune", "mumbai", "delhi", "kolkata", "chennai", "bengaluru"]:
             if city in msg:
                 location = city
                 break
-        
+
         target_date = "tomorrow" if "tomorrow" in msg else "today"
         aspect = WeatherAspect.GENERAL
         if "rain" in msg or "precipitation" in msg or "shower" in msg:
@@ -59,22 +83,40 @@ def create_weather_orchestrator(
         )
         return {"classification": classification}
 
-    # 2. Weather Specialist Agent Node
+    def route_by_intent(state: AgentState) -> str:
+        classification = state.get("classification")
+        if classification and classification.intent in (IntentType.ALERT, IntentType.GENERAL):
+            return "rag_agent"
+        return "weather_agent"
+
     async def weather_agent_node(state: AgentState) -> dict:
         classification = state["classification"]
         location = classification.location or "pune"
         target_date = classification.target_date or "tomorrow"
-
-        # Query CQRS Read layer
         fact = await query_service.get_weather_data(location=location, target_date=target_date)
         return {"weather_fact": fact}
 
-    # 3. Response Synthesis & Validation Node
-    async def response_synthesis_node(state: AgentState) -> dict:
-        fact = state["weather_fact"]
-        classification = state["classification"]
+    async def rag_agent_node(state: AgentState) -> dict:
+        if rag_synthesizer:
+            resp = rag_synthesizer.answer_query(state["user_message"], top_k=3)
+            return {"rag_response": resp}
+        return {"rag_response": None}
 
-        # Synthesize verified response
+    async def response_synthesis_node(state: AgentState) -> dict:
+        rag_resp = state.get("rag_response")
+        if rag_resp and rag_resp.retrieval_success:
+            return {
+                "final_text": rag_resp.answer,
+                "structured_response": None,
+            }
+
+        fact = state.get("weather_fact")
+        if not fact:
+            return {
+                "final_text": "I was unable to retrieve that information from the data layer.",
+                "structured_response": None,
+            }
+
         rain_phrase = (
             f"Yes, it is expected to rain in {fact.location.capitalize()} {fact.target_date}."
             if fact.will_rain
@@ -89,7 +131,7 @@ def create_weather_orchestrator(
 
         if fact.precipitation_probability_pct is not None:
             details.append(f"precipitation chance of {fact.precipitation_probability_pct:.0f}%")
-        
+
         if fact.wind_speed_kph is not None:
             details.append(f"wind speed at {fact.wind_speed_kph} km/h")
 
@@ -117,15 +159,23 @@ def create_weather_orchestrator(
             "final_text": summary,
         }
 
-    # Connect the Graph
     workflow = StateGraph(AgentState)
     workflow.add_node("query_classifier", query_classifier_node)
     workflow.add_node("weather_agent", weather_agent_node)
+    workflow.add_node("rag_agent", rag_agent_node)
     workflow.add_node("response_synthesis", response_synthesis_node)
 
     workflow.set_entry_point("query_classifier")
-    workflow.add_edge("query_classifier", "weather_agent")
+    workflow.add_conditional_edges(
+        "query_classifier",
+        route_by_intent,
+        {
+            "weather_agent": "weather_agent",
+            "rag_agent": "rag_agent",
+        },
+    )
     workflow.add_edge("weather_agent", "response_synthesis")
+    workflow.add_edge("rag_agent", "response_synthesis")
     workflow.add_edge("response_synthesis", END)
 
     return workflow.compile()

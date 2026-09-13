@@ -12,13 +12,23 @@ from .models import ChatMessageRequest, ChatMessageResponse, IntentType
 from .orchestrator import create_weather_orchestrator
 from .query_service import WeatherDataQueryService
 from .session_store import SessionStore
+from .rag import (
+    BGEM3Embedder,
+    DocumentChunker,
+    EvalMetricResult,
+    HybridRetriever,
+    MinioDocumentStore,
+    RAGEvaluator,
+    RAGResponse,
+    RAGSynthesizer,
+    VectorStoreClient,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_chat_settings()
 
-    # Redis
     redis = None
     try:
         redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -26,20 +36,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         redis = None
 
-    # Query service & LLM client
     query_service = WeatherDataQueryService(settings, redis)
     await query_service.start()
 
     llm_client = LLMClient(settings)
     session_store = SessionStore(redis, settings.session_ttl_seconds)
 
-    orchestrator = create_weather_orchestrator(query_service, llm_client)
+    evaluator = RAGEvaluator()
+    evaluator.setup_benchmark_corpus()
+
+    orchestrator = create_weather_orchestrator(
+        query_service, llm_client, rag_synthesizer=evaluator.synthesizer
+    )
 
     app.state.settings = settings
     app.state.redis = redis
     app.state.query_service = query_service
     app.state.llm_client = llm_client
     app.state.session_store = session_store
+    app.state.evaluator = evaluator
     app.state.orchestrator = orchestrator
 
     yield
@@ -50,7 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await redis.aclose()
 
 
-app = FastAPI(title="WeatherGPT Chat Service", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,7 +78,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "weathergpt-chat"}
+    return {"status": "ok", "service": "weathergpt-chat-rag"}
 
 
 @app.get("/ready")
@@ -71,6 +86,7 @@ async def ready() -> dict[str, object]:
     checks = {
         "database": await app.state.query_service.ping(),
         "redis": bool(await app.state.redis.ping()) if app.state.redis else False,
+        "knowledge_base": len(app.state.evaluator.vector_store.get_all_chunks()) > 0,
     }
     return {"status": "ready" if any(checks.values()) else "degraded", "checks": checks}
 
@@ -81,22 +97,21 @@ async def handle_message(req: ChatMessageRequest) -> ChatMessageResponse:
     orchestrator = app.state.orchestrator
     session_store = app.state.session_store
 
-    # 1. Log incoming user query to session store
     await session_store.add_message(session_id, "user", req.message)
 
-    # 2. Invoke LangGraph Orchestrator
     result = await orchestrator.ainvoke(
         {
             "user_message": req.message,
             "session_id": session_id,
             "classification": None,
             "weather_fact": None,
+            "rag_response": None,
             "structured_response": None,
             "final_text": None,
         }
     )
 
-    response_text = result.get("final_text") or "I was unable to retrieve that weather information."
+    response_text = result.get("final_text") or "I was unable to retrieve that information."
     structured = result.get("structured_response")
     intent = (
         result["classification"].intent
@@ -104,7 +119,6 @@ async def handle_message(req: ChatMessageRequest) -> ChatMessageResponse:
         else IntentType.WEATHER_FORECAST
     )
 
-    # 3. Store response
     await session_store.add_message(
         session_id,
         "assistant",
@@ -123,3 +137,15 @@ async def handle_message(req: ChatMessageRequest) -> ChatMessageResponse:
 @app.get("/api/v1/chat/history/{session_id}")
 async def get_history(session_id: str) -> list[dict]:
     return await app.state.session_store.get_history(session_id)
+
+
+@app.get("/api/v1/rag/eval", response_model=EvalMetricResult)
+async def run_ragas_evaluation() -> EvalMetricResult:
+    evaluator: RAGEvaluator = app.state.evaluator
+    return evaluator.evaluate_production_baseline()
+
+
+@app.post("/api/v1/rag/query", response_model=RAGResponse)
+async def query_knowledge_base(query: str, top_k: int = 3) -> RAGResponse:
+    evaluator: RAGEvaluator = app.state.evaluator
+    return evaluator.synthesizer.answer_query(query, top_k=top_k)

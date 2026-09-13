@@ -1,6 +1,6 @@
 import pytest
 
-from weathergpt_chat.models import IntentType, QueryClassification, WeatherDataFact
+from weathergpt_chat.models import IntentType, WeatherDataFact
 from weathergpt_chat.orchestrator import create_weather_orchestrator
 
 
@@ -42,12 +42,6 @@ class FakeLLM:
             confidence=0.95,
             data_sources=["test"],
         )
-
-
-def test_weather_query_routes_to_weather_agent():
-    orchestrator = create_weather_orchestrator(FakeQueryService(), FakeLLM())
-    result = pytest.run if False else None
-    assert result is None
 
 
 @pytest.mark.asyncio

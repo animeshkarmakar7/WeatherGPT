@@ -1,9 +1,21 @@
+import hashlib
 import re
-from uuid import uuid4
+from dataclasses import dataclass
+
 from .models import DocumentChunk, DocumentType
 
 
+@dataclass(frozen=True)
+class ParsedPage:
+    page_number: int
+    text: str
+
+
 class DocumentChunker:
+    def __init__(self, max_chars: int = 1800, overlap_chars: int = 250) -> None:
+        self.max_chars = max_chars
+        self.overlap_chars = overlap_chars
+
     def chunk_document(
         self,
         doc_id: str,
@@ -13,151 +25,43 @@ class DocumentChunker:
         region: str = "all",
         language: str = "en",
         doc_date: str = "2026-01-01",
+        pages: list[ParsedPage] | None = None,
     ) -> list[DocumentChunk]:
-        if doc_type == DocumentType.GOVERNMENT_SOP:
-            return self._chunk_sop(doc_id, doc_name, text, region, language, doc_date)
-        elif doc_type == DocumentType.WEATHER_BULLETIN:
-            return self._chunk_bulletin_table(doc_id, doc_name, text, region, language, doc_date)
-        elif doc_type == DocumentType.FAQ_ADVISORY:
-            return self._chunk_faq(doc_id, doc_name, text, region, language, doc_date)
-        elif doc_type == DocumentType.CLIMATE_REPORT:
-            return self._chunk_climate_report(doc_id, doc_name, text, region, language, doc_date)
-        return self._chunk_generic(doc_id, doc_name, doc_type, text, region, language, doc_date)
-
-    def _chunk_sop(
-        self, doc_id: str, doc_name: str, text: str, region: str, language: str, doc_date: str
-    ) -> list[DocumentChunk]:
-        sections = re.split(r"(?=(?:Section\s+\d+|Article\s+\d+|[A-Z0-9\.\s]{4,}:))", text)
+        source_pages = pages or [ParsedPage(1, text)]
         chunks: list[DocumentChunk] = []
-        page = 1
-        for idx, sec in enumerate(sections):
-            clean = sec.strip()
-            if not clean:
+        for page in source_pages:
+            page_text = page.text.strip()
+            if not page_text:
                 continue
-            lines = clean.split("\n", 1)
-            title = lines[0][:80].strip()
-            paragraphs = self._sliding_window_tokens(clean, max_tokens=600, overlap_tokens=90)
-            for p_idx, p in enumerate(paragraphs):
-                chunks.append(
-                    DocumentChunk(
-                        chunk_id=f"{doc_id}-sop-{idx}-{p_idx}",
-                        doc_id=doc_id,
-                        doc_name=doc_name,
-                        doc_type=DocumentType.GOVERNMENT_SOP,
-                        content=p,
-                        page_number=page,
-                        section_title=title,
-                        region=region,
-                        language=language,
-                        doc_date=doc_date,
-                    )
-                )
-            page += 1
+            sections = re.split(r"(?=^(?:Section|SECTION|Question|QUESTION)\s+[^:\n]+:?)", page_text, flags=re.MULTILINE)
+            for section_index, section in enumerate(sections):
+                content = section.strip()
+                if not content:
+                    continue
+                section_match = re.match(r"^(?:Section|SECTION|Question|QUESTION)\s+([^:\n]+):?", content)
+                section_title = section_match.group(1).strip() if section_match else "Document Content"
+                start = 0
+                while start < len(content):
+                    end = min(len(content), start + self.max_chars)
+                    chunk_text = content[start:end].strip()
+                    if chunk_text:
+                        chunk_id = hashlib.sha256(f"{doc_id}:{page.page_number}:{section_index}:{start}:{chunk_text}".encode("utf-8")).hexdigest()[:32]
+                        chunks.append(
+                            DocumentChunk(
+                                chunk_id=chunk_id,
+                                doc_id=doc_id,
+                                doc_name=doc_name,
+                                doc_type=doc_type,
+                                section_title=section_title,
+                                page_number=page.page_number,
+                                content=chunk_text,
+                                region=region,
+                                language=language,
+                                doc_date=doc_date,
+                                metadata={"page_start": page.page_number, "page_end": page.page_number},
+                            )
+                        )
+                    if end >= len(content):
+                        break
+                    start = max(start + 1, end - self.overlap_chars)
         return chunks
-
-    def _chunk_bulletin_table(
-        self, doc_id: str, doc_name: str, text: str, region: str, language: str, doc_date: str
-    ) -> list[DocumentChunk]:
-        blocks = text.split("\n\n")
-        chunks: list[DocumentChunk] = []
-        for idx, blk in enumerate(blocks):
-            clean = blk.strip()
-            if len(clean) < 30:
-                continue
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=f"{doc_id}-tbl-{idx}",
-                    doc_id=doc_id,
-                    doc_name=doc_name,
-                    doc_type=DocumentType.WEATHER_BULLETIN,
-                    content=clean,
-                    page_number=1,
-                    section_title="Observation & Warning Table",
-                    region=region,
-                    language=language,
-                    doc_date=doc_date,
-                )
-            )
-        return chunks
-
-    def _chunk_faq(
-        self, doc_id: str, doc_name: str, text: str, region: str, language: str, doc_date: str
-    ) -> list[DocumentChunk]:
-        qa_pairs = re.split(r"(?=(?:Q\d*:|Question:|FAQ:|\n\?))", text)
-        chunks: list[DocumentChunk] = []
-        for idx, qa in enumerate(qa_pairs):
-            clean = qa.strip()
-            if len(clean) < 20:
-                continue
-            first_line = clean.split("\n", 1)[0][:60]
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=f"{doc_id}-faq-{idx}",
-                    doc_id=doc_id,
-                    doc_name=doc_name,
-                    doc_type=DocumentType.FAQ_ADVISORY,
-                    content=clean,
-                    page_number=1,
-                    section_title=first_line,
-                    region=region,
-                    language=language,
-                    doc_date=doc_date,
-                )
-            )
-        return chunks
-
-    def _chunk_climate_report(
-        self, doc_id: str, doc_name: str, text: str, region: str, language: str, doc_date: str
-    ) -> list[DocumentChunk]:
-        paragraphs = self._sliding_window_tokens(text, max_tokens=900, overlap_tokens=90)
-        chunks: list[DocumentChunk] = []
-        for idx, p in enumerate(paragraphs):
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=f"{doc_id}-clim-{idx}",
-                    doc_id=doc_id,
-                    doc_name=doc_name,
-                    doc_type=DocumentType.CLIMATE_REPORT,
-                    content=p,
-                    page_number=(idx // 2) + 1,
-                    section_title=f"Climate Trend Analysis Part {idx + 1}",
-                    region=region,
-                    language=language,
-                    doc_date=doc_date,
-                )
-            )
-        return chunks
-
-    def _chunk_generic(
-        self, doc_id: str, doc_name: str, doc_type: DocumentType, text: str, region: str, language: str, doc_date: str
-    ) -> list[DocumentChunk]:
-        paragraphs = self._sliding_window_tokens(text, max_tokens=500, overlap_tokens=50)
-        chunks: list[DocumentChunk] = []
-        for idx, p in enumerate(paragraphs):
-            chunks.append(
-                DocumentChunk(
-                    chunk_id=f"{doc_id}-gen-{idx}",
-                    doc_id=doc_id,
-                    doc_name=doc_name,
-                    doc_type=doc_type,
-                    content=p,
-                    page_number=1,
-                    section_title="General Guidance",
-                    region=region,
-                    language=language,
-                    doc_date=doc_date,
-                )
-            )
-        return chunks
-
-    def _sliding_window_tokens(self, text: str, max_tokens: int, overlap_tokens: int) -> list[str]:
-        words = text.split()
-        if len(words) <= max_tokens:
-            return [text.strip()]
-        result: list[str] = []
-        step = max_tokens - overlap_tokens
-        for i in range(0, len(words), step):
-            sub = " ".join(words[i : i + max_tokens])
-            if sub.strip():
-                result.append(sub.strip())
-        return result

@@ -20,6 +20,13 @@ services:
       - vllm
     volumes:
       - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
 
   chat-service:

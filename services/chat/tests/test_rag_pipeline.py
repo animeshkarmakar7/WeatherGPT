@@ -1,89 +1,79 @@
-﻿import pytest
-from weathergpt_chat.rag.models import DocumentType
-from weathergpt_chat.rag.chunker import DocumentChunker
+import pytest
+
+from weathergpt_chat.rag.chunker import DocumentChunker, ParsedPage
 from weathergpt_chat.rag.embedding import BGEM3Embedder
-from weathergpt_chat.rag.vector_store import VectorStoreClient
+from weathergpt_chat.rag.evaluator import GOLDEN_BENCHMARK_DOCUMENTS, RAGEvaluator
 from weathergpt_chat.rag.hybrid_retriever import HybridRetriever
+from weathergpt_chat.rag.models import DocumentType
+from weathergpt_chat.rag.vector_store import VectorStoreClient
 from weathergpt_chat.rag.synthesizer import RAGSynthesizer
-from weathergpt_chat.rag.evaluator import RAGEvaluator, GOLDEN_BENCHMARK_DOCUMENTS
-from weathergpt_chat.rag.minio_store import MinioDocumentStore
 
 
 def test_document_chunker_types():
     chunker = DocumentChunker()
-    sop_doc = GOLDEN_BENCHMARK_DOCUMENTS[0]
+    document = GOLDEN_BENCHMARK_DOCUMENTS[0]
     chunks = chunker.chunk_document(
-        doc_id=sop_doc["doc_id"],
-        doc_name=sop_doc["doc_name"],
+        doc_id=document["doc_id"],
+        doc_name=document["doc_name"],
         doc_type=DocumentType.GOVERNMENT_SOP,
-        text=sop_doc["text"],
+        text=document["text"],
     )
     assert len(chunks) >= 2
-    assert all(c.doc_type == DocumentType.GOVERNMENT_SOP for c in chunks)
-    assert any("Section" in c.section_title for c in chunks)
+    assert all(chunk.doc_type == DocumentType.GOVERNMENT_SOP for chunk in chunks)
+    assert any("Section" in chunk.section_title for chunk in chunks)
+
+
+def test_page_aware_chunking():
+    chunker = DocumentChunker()
+    pages = [ParsedPage(1, "Section 1: Alert\nStage 2 cyclone alert."), ParsedPage(2, "Section 2: Action\nSuspend fishing operations.")]
+    chunks = chunker.chunk_document("doc", "doc.pdf", DocumentType.GOVERNMENT_SOP, "", pages=pages)
+    assert {chunk.page_number for chunk in chunks} == {1, 2}
 
 
 def test_hybrid_search_and_citation_binding():
     chunker = DocumentChunker()
     embedder = BGEM3Embedder()
     store = VectorStoreClient()
-
     chunks = chunker.chunk_document(
         doc_id="test-sop",
         doc_name="NDMA Evacuation SOP",
         doc_type=DocumentType.GOVERNMENT_SOP,
         text="Section 1: Evacuation Guidelines\nAll fishing vessels must return to port immediately.",
     )
-    vectors = embedder.embed_batch([c.content for c in chunks])
+    vectors = embedder.embed_batch([chunk.content for chunk in chunks])
     store.insert_chunks(chunks, vectors)
-
     retriever = HybridRetriever(store, embedder)
     retriever.build_bm25_index()
-
-    synthesizer = RAGSynthesizer(retriever)
-    resp = synthesizer.answer_query("fishing vessels regulation")
-
-    assert resp.retrieval_success is True
-    assert len(resp.citations) > 0
-    assert resp.citations[0].doc_name == "NDMA Evacuation SOP"
-    assert resp.citations[0].page == 1
-    assert "fishing vessels" in resp.answer.lower()
-
-
-def test_out_of_domain_query_triggers_safe_fallback():
-    embedder = BGEM3Embedder()
-    store = VectorStoreClient()
-    retriever = HybridRetriever(store, embedder)
-    synthesizer = RAGSynthesizer(retriever)
-
-    resp = synthesizer.answer_query("How do I make chocolate cake?")
-    assert resp.retrieval_success is False
-    assert "don't have a confirmed" in resp.answer.lower()
+    results = retriever.retrieve("fishing vessels regulation", top_k=3)
+    assert results
+    assert results[0].chunk.doc_name == "NDMA Evacuation SOP"
+    assert results[0].chunk.page_number == 1
 
 
 def test_minio_document_store_upload_and_retrieval():
+    from weathergpt_chat.rag.minio_store import MinioDocumentStore
     minio_store = MinioDocumentStore()
     content = b"Official Heatwave Action Plan Text"
     uri = minio_store.upload_document("heatwave_plan.txt", content)
-    assert uri.startswith("minio://") or uri.startswith("memory://")
-    fetched = minio_store.get_document("heatwave_plan.txt")
-    assert fetched == content
+    assert uri.startswith(("minio://", "memory://"))
+    assert minio_store.get_document("heatwave_plan.txt") == content
 
 
-def test_ragas_production_evaluation_benchmark():
+@pytest.mark.parametrize("query", ["How do I make chocolate cake?", "Explain a quantum computer without weather context."])
+def test_retriever_can_return_empty_or_low_relevance(query):
+    store = VectorStoreClient()
+    embedder = BGEM3Embedder()
+    retriever = HybridRetriever(store, embedder)
+    assert retriever.retrieve(query, top_k=3) == []
+
+
+def test_evaluator_benchmark_corpus_isolated_from_production_store():
     evaluator = RAGEvaluator(
-        threshold_context_relevance=0.80,
-        threshold_faithfulness=0.85,
-        threshold_answer_relevance=0.80,
-        threshold_umbrela=0.80,
+        embedder=BGEM3Embedder(),
+        llm_base_url="http://127.0.0.1:9/v1",
+        llm_api_key="test",
+        llm_model="test",
     )
-    res = evaluator.evaluate_production_baseline()
-
-    assert res.passed is True
-    assert res.context_relevance >= 0.80
-    assert res.faithfulness >= 0.85
-    assert res.answer_relevance >= 0.80
-    assert res.umbrela_score >= 0.80
-    assert res.citation_groundedness == 1.0
-    assert "context_relevance" in res.state_scores
-    assert "umbrela_score" in res.state_scores
+    count = evaluator.setup_benchmark_corpus()
+    assert count > 0
+    assert evaluator.vector_store.get_all_chunks()

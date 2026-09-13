@@ -38,7 +38,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     retriever.build_bm25_index()
     synthesizer = RAGSynthesizer(retriever, settings.llm_base_url, settings.llm_api_key, settings.llm_model, settings.llm_timeout_seconds, settings.rag_min_score)
     evaluator = RAGEvaluator(embedder, settings.llm_base_url, settings.llm_api_key, settings.llm_model, settings.llm_timeout_seconds)
-    evaluator.setup_benchmark_corpus()
     session_store = SessionStore(redis, settings.session_ttl_seconds)
     minio_store = MinioDocumentStore(settings.minio_endpoint, settings.minio_access_key, settings.minio_secret_key, settings.minio_secure, settings.minio_bucket)
     chunker = DocumentChunker()

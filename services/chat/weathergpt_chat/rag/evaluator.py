@@ -1,4 +1,3 @@
-import re
 from typing import Any
 
 from .chunker import DocumentChunker
@@ -37,9 +36,21 @@ GOLDEN_BENCHMARK_DOCUMENTS = [
 ]
 
 LABELED_EVALUATION_SET = [
-    {"question": "What is the Stage 2 Cyclone Alert guideline for fishing operations?", "relevant_doc_id": "imd-cyclone-sop-2026", "key_phrases": ["stage 2", "fishing operations must be suspended"]},
-    {"question": "What is the temperature threshold to declare a heatwave in plains?", "relevant_doc_id": "imd-heatwave-action-plan", "key_phrases": ["40°C", "plains", "heatwave"]},
-    {"question": "What is the difference between Warning Level and Danger Level in flood monitoring?", "relevant_doc_id": "cwc-monsoon-flood-faq", "key_phrases": ["warning level", "danger level", "evacuation"]},
+    {
+        "question": "What is the Stage 2 Cyclone Alert guideline for fishing operations?",
+        "reference": "Stage 2 Cyclone Alert is issued 48 hours prior to expected adverse weather and all fishing operations must be suspended immediately.",
+        "relevant_doc_id": "imd-cyclone-sop-2026",
+    },
+    {
+        "question": "What is the temperature threshold to declare a heatwave in plains?",
+        "reference": "A heatwave is declared when maximum temperature reaches at least 40°C in plains.",
+        "relevant_doc_id": "imd-heatwave-action-plan",
+    },
+    {
+        "question": "What is the difference between Warning Level and Danger Level in flood monitoring?",
+        "reference": "Warning Level begins flood preparation, while Danger Level indicates water at or above the level that causes damage and mandates immediate evacuation.",
+        "relevant_doc_id": "cwc-monsoon-flood-faq",
+    },
 ]
 
 
@@ -52,46 +63,83 @@ class RAGEvaluator:
         self.synthesizer = RAGSynthesizer(self.retriever, llm_base_url, llm_api_key, llm_model, llm_timeout_seconds)
 
     def setup_benchmark_corpus(self) -> int:
-        all_chunks: list[DocumentChunk] = []
-        for doc in GOLDEN_BENCHMARK_DOCUMENTS:
-            all_chunks.extend(
-                self.chunker.chunk_document(
-                    doc_id=doc["doc_id"],
-                    doc_name=doc["doc_name"],
-                    doc_type=doc["doc_type"],
-                    text=doc["text"],
-                    region=doc["region"],
-                    doc_date=doc["doc_date"],
-                )
-            )
-        vectors = self.embedder.embed_batch([c.content for c in all_chunks])
-        self.vector_store.insert_chunks(all_chunks, vectors)
+        chunks: list[DocumentChunk] = []
+        for document in GOLDEN_BENCHMARK_DOCUMENTS:
+            chunks.extend(self.chunker.chunk_document(document["doc_id"], document["doc_name"], document["doc_type"], document["text"], document["region"], "en", document["doc_date"]))
+        vectors = self.embedder.embed_batch([chunk.content for chunk in chunks])
+        self.vector_store.insert_chunks(chunks, vectors)
         self.retriever.build_bm25_index()
-        return len(all_chunks)
+        return len(chunks)
 
-    def _retrieval_scores(self) -> tuple[float, float, float]:
-        recall_scores: list[float] = []
-        precision_scores: list[float] = []
-        reciprocal_ranks: list[float] = []
-        for sample in LABELED_EVALUATION_SET:
-            results = self.retriever.retrieve(sample["question"], top_k=5)
-            relevant = [r for r in results if r.chunk.doc_id == sample["relevant_doc_id"]]
-            recall_scores.append(1.0 if relevant else 0.0)
-            precision_scores.append(len(relevant) / max(1, len(results)))
-            rank = next((i for i, r in enumerate(results, start=1) if r.chunk.doc_id == sample["relevant_doc_id"]), None)
-            reciprocal_ranks.append(1.0 / rank if rank else 0.0)
-        return sum(recall_scores) / len(recall_scores), sum(precision_scores) / len(precision_scores), sum(reciprocal_ranks) / len(reciprocal_ranks)
-
-    def evaluate_production_baseline(self) -> EvalMetricResult:
+    async def evaluate_production_baseline(self) -> EvalMetricResult:
         if not self.vector_store.get_all_chunks():
             self.setup_benchmark_corpus()
-        recall_at_5, precision_at_5, mrr = self._retrieval_scores()
+
+        try:
+            from openai import AsyncOpenAI
+            from ragas.llms import llm_factory
+            from ragas.embeddings import HuggingFaceEmbeddings
+            from ragas.metrics.collections import AnswerCorrectness, AnswerRelevancy, ContextPrecision, ContextRecall, Faithfulness
+        except Exception as exc:
+            raise RuntimeError("RAGAS evaluation dependencies are unavailable") from exc
+
+        import os
+        import asyncio
+        client = AsyncOpenAI(api_key=self.synthesizer.llm_api_key, base_url=self.synthesizer.llm_base_url, timeout=self.synthesizer.timeout_seconds)
+        evaluator_llm = llm_factory(self.synthesizer.llm_model, provider="openai", client=client)
+        device = os.getenv("WEATHERGPT_RAGAS_DEVICE", "cpu")
+        evaluator_embeddings = HuggingFaceEmbeddings(model=os.getenv("WEATHERGPT_BGE_MODEL_PATH", "BAAI/bge-m3"), device=device)
+        metrics = {
+            "context_precision": ContextPrecision(llm=evaluator_llm),
+            "context_recall": ContextRecall(llm=evaluator_llm),
+            "faithfulness": Faithfulness(llm=evaluator_llm),
+            "answer_relevancy": AnswerRelevancy(llm=evaluator_llm, embeddings=evaluator_embeddings),
+            "answer_correctness": AnswerCorrectness(llm=evaluator_llm),
+        }
+
+        rows: list[dict[str, Any]] = []
+        for sample in LABELED_EVALUATION_SET:
+            retrievals = self.retriever.retrieve(sample["question"], top_k=5)
+            contexts = [result.chunk.content for result in retrievals]
+            if not contexts:
+                raise RuntimeError(f"No retrieval result for evaluation query: {sample['question']}")
+            response = await self.synthesizer.answer_query(sample["question"], top_k=5)
+            if not response.retrieval_success:
+                raise RuntimeError(f"RAG generation failed for evaluation query: {sample['question']}")
+            result_values = await asyncio.gather(
+                metrics["context_precision"].ascore(user_input=sample["question"], reference=sample["reference"], retrieved_contexts=contexts),
+                metrics["context_recall"].ascore(user_input=sample["question"], reference=sample["reference"], retrieved_contexts=contexts),
+                metrics["faithfulness"].ascore(user_input=sample["question"], response=response.answer, retrieved_contexts=contexts),
+                metrics["answer_relevancy"].ascore(user_input=sample["question"], response=response.answer),
+                metrics["answer_correctness"].ascore(user_input=sample["question"], response=response.answer, reference=sample["reference"]),
+            )
+            rows.append({
+                "context_precision": float(result_values[0].value),
+                "context_recall": float(result_values[1].value),
+                "faithfulness": float(result_values[2].value),
+                "answer_relevancy": float(result_values[3].value),
+                "answer_correctness": float(result_values[4].value),
+            })
+
+        await client.close()
+        mean = {key: sum(row[key] for row in rows) / len(rows) for key in rows[0]}
+        citation_groundedness = 1.0
+        passed = (
+            mean["context_precision"] >= 0.80
+            and mean["context_recall"] >= 0.80
+            and mean["faithfulness"] >= 0.90
+            and mean["answer_relevancy"] >= 0.80
+            and mean["answer_correctness"] >= 0.80
+        )
         return EvalMetricResult(
-            context_relevance=recall_at_5,
-            faithfulness=0.0,
-            answer_relevance=0.0,
-            citation_groundedness=1.0,
-            umbrela_score=0.0,
-            passed=recall_at_5 >= 0.9 and precision_at_5 >= 0.5 and mrr >= 0.8,
-            state_scores={"recall_at_5": round(recall_at_5, 4), "precision_at_5": round(precision_at_5, 4), "mrr": round(mrr, 4)},
+            context_relevance=round(mean["context_precision"], 4),
+            faithfulness=round(mean["faithfulness"], 4),
+            answer_relevance=round(mean["answer_relevancy"], 4),
+            citation_groundedness=citation_groundedness,
+            umbrela_score=round(mean["context_recall"], 4),
+            passed=passed,
+            state_scores={
+                **{key: round(value, 4) for key, value in mean.items()},
+                "citation_groundedness": citation_groundedness,
+            },
         )

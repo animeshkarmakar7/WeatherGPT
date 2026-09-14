@@ -1,7 +1,8 @@
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Literal
 from uuid import UUID, uuid4
+
 from pydantic import BaseModel, Field
 
 
@@ -50,8 +51,12 @@ class WeatherDataFact(BaseModel):
     source_url: str | None = None
     observed_at: datetime | None = None
     fetched_at: datetime | None = None
-    freshness: str = "unknown"
+    freshness: Literal["fresh", "stale", "unknown"] = "unknown"
     cached: bool = False
+
+
+class WeatherNarrativeResponse(BaseModel):
+    summary: str = Field(min_length=1)
 
 
 class StructuredWeatherResponse(BaseModel):
@@ -66,7 +71,7 @@ class StructuredWeatherResponse(BaseModel):
     humidity_pct: float | None = None
     wind_speed_kph: float | None = None
     conditions: str
-    confidence: float = 0.90
+    confidence: float = 0.0
     data_sources: list[str] = Field(default_factory=list)
     quality_flags: list[str] = Field(default_factory=list)
     observed_at: datetime | None = None

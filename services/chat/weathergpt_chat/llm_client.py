@@ -1,5 +1,3 @@
-import json
-
 import httpx
 from pydantic import BaseModel
 
@@ -23,15 +21,21 @@ class LLMClient:
             return False
 
     async def generate_structured(self, prompt: str, system_prompt: str, response_model: type[BaseModel]) -> BaseModel:
-        schema_json = json.dumps(response_model.model_json_schema())
+        schema = response_model.model_json_schema()
         payload = {
             "model": self.settings.llm_model,
             "messages": [
-                {"role": "system", "content": f"{system_prompt}\nReturn only JSON matching this schema:\n{schema_json}"},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             "temperature": self.settings.llm_temperature,
-            "response_format": {"type": "json_object"},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_model.__name__.lower(),
+                    "schema": schema,
+                },
+            },
         }
         try:
             response = await self.client.post(

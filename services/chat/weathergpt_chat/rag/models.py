@@ -1,4 +1,5 @@
-﻿from enum import StrEnum
+from datetime import datetime
+from enum import StrEnum
 from typing import Any
 from pydantic import BaseModel, Field
 
@@ -54,5 +55,9 @@ class EvalMetricResult(BaseModel):
     answer_relevance: float
     citation_groundedness: float
     umbrela_score: float
+    retrieval_recall_at_5: float = 0.0
+    retrieval_mrr: float = 0.0
+    retrieval_hit_rate: float = 0.0
+    answer_correctness: float = 0.0
     passed: bool
     state_scores: dict[str, float]

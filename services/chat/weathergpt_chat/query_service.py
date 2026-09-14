@@ -206,18 +206,19 @@ class WeatherDataQueryService:
             observed_at = datetime.fromisoformat(str(current["time"]))
         current_code = current.get("weather_code") if is_current else fields["wcode"]
         current_precipitation = float(current.get("precipitation") or 0.0) if is_current else float(fields["precip"])
+        current_wind = float(current.get("wind_speed_10m")) if is_current and current.get("wind_speed_10m") is not None else None
         return WeatherDataFact(
             location=location,
             latitude=lat,
             longitude=lon,
             target_date=target_date,
-            temp_c=float(current_temp) if current_temp is not None else None,
-            temp_min_c=float(fields["temp_min"]),
-            temp_max_c=float(fields["temp_max"]),
+            temp_c=float(current_temp) if is_current else None,
+            temp_min_c=float(current_temp) if is_current else float(fields["temp_min"]),
+            temp_max_c=float(current_temp) if is_current else float(fields["temp_max"]),
             humidity_pct=float(current["relative_humidity_2m"]) if is_current and current.get("relative_humidity_2m") is not None else None,
             precipitation_mm=current_precipitation,
-            precipitation_probability_pct=float(fields["precip_prob"]),
-            wind_speed_kph=float(current.get("wind_speed_10m")) if is_current and current.get("wind_speed_10m") is not None else float(fields["wind"]),
+            precipitation_probability_pct=None if is_current else float(fields["precip_prob"]),
+            wind_speed_kph=current_wind if current_wind is not None else float(fields["wind"]),
             weather_code=str(current_code) if current_code is not None else None,
             condition_description=_wmo_to_condition(current_code),
             will_rain=current_precipitation > 0.0 if is_current else float(fields["precip_prob"]) >= 50.0,

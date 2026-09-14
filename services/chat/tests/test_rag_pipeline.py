@@ -1,7 +1,5 @@
 import hashlib
 
-import pytest
-
 from weathergpt_chat.rag.chunker import DocumentChunker, ParsedPage
 from weathergpt_chat.rag.evaluator import GOLDEN_BENCHMARK_DOCUMENTS, RAGEvaluator
 from weathergpt_chat.rag.hybrid_retriever import HybridRetriever
@@ -47,7 +45,7 @@ def test_hybrid_search():
     store = VectorStoreClient()
     chunks = chunker.chunk_document("test-sop", "NDMA Evacuation SOP", DocumentType.GOVERNMENT_SOP, "Section 1: Evacuation Guidelines\nAll fishing vessels must return to port immediately.")
     store.insert_chunks(chunks, embedder.embed_batch([chunk.content for chunk in chunks]))
-    retriever = HybridRetriever(store, embedder)
+    retriever = HybridRetriever(store, embedder, use_reranker=False)
     results = retriever.retrieve("fishing vessels regulation", top_k=3)
     assert results
     assert results[0].chunk.doc_name == "NDMA Evacuation SOP"
@@ -55,7 +53,7 @@ def test_hybrid_search():
 
 def test_retriever_empty_store_returns_empty():
     store = VectorStoreClient()
-    retriever = HybridRetriever(store, TestEmbedder())
+    retriever = HybridRetriever(store, TestEmbedder(), use_reranker=False)
     assert retriever.retrieve("How do I make chocolate cake?", top_k=3) == []
 
 

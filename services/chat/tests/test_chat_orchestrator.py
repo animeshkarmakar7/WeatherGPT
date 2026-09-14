@@ -1,6 +1,6 @@
 import pytest
 
-from weathergpt_chat.models import IntentType, WeatherDataFact
+from weathergpt_chat.models import IntentType, WeatherDataFact, WeatherNarrativeResponse
 from weathergpt_chat.orchestrator import create_weather_orchestrator
 
 
@@ -22,30 +22,19 @@ class FakeQueryService:
             condition_description="Mainly clear",
             will_rain=False,
             source="test",
+            source_url="https://example.test/weather",
+            freshness="fresh",
         )
 
 
 class FakeLLM:
     async def generate_structured(self, prompt, system_prompt, response_model):
-        return response_model(
-            location="Pune",
-            target_date="current",
-            summary="Current temperature in Pune is 28.0°C.",
-            will_rain=False,
-            precipitation_probability_pct=10.0,
-            temp_c=28.0,
-            temp_min_c=28.0,
-            temp_max_c=28.0,
-            humidity_pct=70.0,
-            wind_speed_kph=12.0,
-            conditions="Mainly clear",
-            confidence=0.95,
-            data_sources=["test"],
-        )
+        assert response_model is WeatherNarrativeResponse
+        return response_model(summary="Current temperature in Pune is 28.0°C.")
 
 
 @pytest.mark.asyncio
-async def test_weather_query_returns_structured_fact():
+async def test_weather_query_returns_source_derived_structured_data():
     orchestrator = create_weather_orchestrator(FakeQueryService(), FakeLLM())
     result = await orchestrator.ainvoke(
         {
@@ -60,4 +49,9 @@ async def test_weather_query_returns_structured_fact():
     )
     assert result["classification"].intent == IntentType.WEATHER_CURRENT
     assert result["structured_response"].temp_c == 28.0
-    assert result["structured_response"].location == "Pune"
+    assert result["structured_response"].temp_min_c == 24.0
+    assert result["structured_response"].temp_max_c == 30.0
+    assert result["structured_response"].will_rain is False
+    assert result["structured_response"].data_sources == ["test"]
+    assert result["structured_response"].freshness == "fresh"
+    assert result["final_text"] == "Current temperature in Pune is 28.0°C."

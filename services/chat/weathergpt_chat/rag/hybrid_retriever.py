@@ -35,9 +35,8 @@ class HybridRetriever:
         self.embedder = embedder
         self.rrf_k = rrf_k
         self.candidate_k = max(candidate_k, 5)
-        self._bm25: BM25Okapi | None = None
-        self._bm25_chunks: list[DocumentChunk] = []
-        self._reranker = _CrossEncoderReranker(reranker_model_path, reranker_fp16) if use_reranker and reranker_model_path else None
+        model_path = reranker_model_path or "BAAI/bge-reranker-v2-m3"
+        self._reranker = _CrossEncoderReranker(model_path, reranker_fp16) if use_reranker else None
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -53,7 +52,6 @@ class HybridRetriever:
             self.build_bm25_index()
         if not self._bm25_chunks:
             return []
-
         candidate_limit = max(self.candidate_k, top_k)
         query_vector = self.embedder.embed_text(query)
         dense_results = self.vector_store.search_dense(query_vector, top_k=candidate_limit, filters=filters)
@@ -64,7 +62,6 @@ class HybridRetriever:
             if filters:
                 ranked = [item for item in ranked if all(getattr(item[0], key, None) == value or item[0].metadata.get(key) == value for key, value in filters.items())]
             bm25_results = ranked[:candidate_limit]
-
         dense_rank = {chunk.chunk_id: rank + 1 for rank, (chunk, _) in enumerate(dense_results)}
         bm25_rank = {chunk.chunk_id: rank + 1 for rank, (chunk, _) in enumerate(bm25_results)}
         dense_score = {chunk.chunk_id: score for chunk, score in dense_results}
@@ -72,7 +69,6 @@ class HybridRetriever:
         chunks_by_id = {chunk.chunk_id: chunk for chunk in self._bm25_chunks}
         combined: list[SearchResult] = []
         query_tokens = set(self._tokenize(query))
-
         for chunk_id in set(dense_rank) | set(bm25_rank):
             chunk = chunks_by_id.get(chunk_id)
             if chunk is None:
@@ -88,7 +84,6 @@ class HybridRetriever:
             age = max(0, 2026 - doc_year)
             score = (rrf + 0.05 * overlap) * max(0.5, 1.0 - age * recency_boost_years)
             combined.append(SearchResult(chunk=chunk, dense_score=dense_score.get(chunk_id, 0.0), bm25_score=bm25_score.get(chunk_id, 0.0), rrf_score=rrf, rerank_score=score))
-
         combined.sort(key=lambda item: item.rrf_score, reverse=True)
         candidates = combined[:candidate_limit]
         if self._reranker:

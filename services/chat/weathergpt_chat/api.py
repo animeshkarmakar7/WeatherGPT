@@ -34,12 +34,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     embedder = BGEM3Embedder(settings.bge_model_path, settings.bge_fp16, 1024)
     vector_store = QdrantVectorStoreClient(settings.qdrant_url, settings.qdrant_collection, 1024)
     vector_store.get_all_chunks()
-    retriever = HybridRetriever(vector_store, embedder, rrf_k=60)
+    retriever = HybridRetriever(
+        vector_store,
+        embedder,
+        rrf_k=60,
+        candidate_k=settings.rag_candidate_k,
+        reranker_model_path=settings.reranker_model_path,
+        reranker_fp16=settings.reranker_fp16,
+        use_reranker=settings.use_reranker,
+    )
     retriever.build_bm25_index()
     synthesizer = RAGSynthesizer(retriever, settings.llm_base_url, settings.llm_api_key, settings.llm_model, settings.llm_timeout_seconds, settings.rag_min_score)
     evaluator = RAGEvaluator(embedder, settings.llm_base_url, settings.llm_api_key, settings.llm_model, settings.llm_timeout_seconds)
     session_store = SessionStore(redis, settings.session_ttl_seconds)
     minio_store = MinioDocumentStore(settings.minio_endpoint, settings.minio_access_key, settings.minio_secret_key, settings.minio_secure, settings.minio_bucket)
+    if not minio_store.health():
+        await query_service.close()
+        await llm_client.close()
+        await redis.aclose()
+        raise RuntimeError("Configured MinIO document store is unavailable")
     chunker = DocumentChunker()
     orchestrator = create_weather_orchestrator(query_service, llm_client, rag_synthesizer=synthesizer)
     app.state.settings = settings
@@ -61,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await redis.aclose()
 
 
-app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.6.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -72,14 +85,25 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready")
 async def ready() -> dict[str, object]:
-    checks = {"database": await app.state.query_service.ping(), "redis": bool(await app.state.redis.ping()), "qdrant": False, "llm": await app.state.llm_client.health(), "knowledge_base": False}
+    checks = {
+        "database": await app.state.query_service.ping(),
+        "redis": bool(await app.state.redis.ping()),
+        "qdrant": False,
+        "minio": False,
+        "llm": await app.state.llm_client.health(),
+        "knowledge_base": False,
+    }
     try:
         chunks = app.state.vector_store.get_all_chunks()
         checks["qdrant"] = True
         checks["knowledge_base"] = len(chunks) > 0
     except Exception:
         pass
-    required = all(bool(checks[key]) for key in ("database", "redis", "qdrant", "llm"))
+    try:
+        checks["minio"] = app.state.minio_store.health()
+    except Exception:
+        pass
+    required = all(bool(checks[key]) for key in ("database", "redis", "qdrant", "minio", "llm"))
     return {"status": "ready" if required else "degraded", "checks": checks}
 
 

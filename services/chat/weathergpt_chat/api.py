@@ -4,7 +4,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 
 import fitz
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
 
@@ -14,6 +14,7 @@ from .models import ChatMessageRequest, ChatMessageResponse, IntentType
 from .orchestrator import create_weather_orchestrator
 from .query_service import WeatherDataQueryService
 from .session_store import SessionStore
+from .weather_dashboard import WeatherDashboardService
 from .rag import BGEM3Embedder, DocumentChunker, DocumentType, HybridRetriever, MinioDocumentStore, QdrantVectorStoreClient, RAGEvaluator, RAGResponse, RAGSynthesizer
 from .rag.chunker import ParsedPage
 
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await redis.aclose()
         raise RuntimeError("Configured MinIO document store is unavailable")
     chunker = DocumentChunker()
+    dashboard_service = WeatherDashboardService(query_service)
     orchestrator = create_weather_orchestrator(query_service, llm_client, rag_synthesizer=synthesizer)
     app.state.settings = settings
     app.state.redis = redis
@@ -68,13 +70,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.minio_store = minio_store
     app.state.chunker = chunker
     app.state.embedder = embedder
+    app.state.dashboard_service = dashboard_service
     yield
     await query_service.close()
     await llm_client.close()
     await redis.aclose()
 
 
-app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="WeatherGPT Chat & RAG Service", version="0.7.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
@@ -105,6 +108,26 @@ async def ready() -> dict[str, object]:
         pass
     required = all(bool(checks[key]) for key in ("database", "redis", "qdrant", "minio", "llm"))
     return {"status": "ready" if required else "degraded", "checks": checks}
+
+
+@app.get("/api/v1/weather/search")
+async def search_weather_locations(q: str = Query(min_length=2, max_length=80)) -> list[dict]:
+    try:
+        return await app.state.dashboard_service.search_locations(q)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Verified location search is unavailable") from exc
+
+
+@app.get("/api/v1/weather/dashboard")
+async def weather_dashboard(
+    latitude: float = Query(ge=-90, le=90),
+    longitude: float = Query(ge=-180, le=180),
+    location_name: str | None = Query(default=None, max_length=120),
+) -> dict[str, object]:
+    try:
+        return await app.state.dashboard_service.get_dashboard(latitude, longitude, location_name)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Verified live weather data is unavailable") from exc
 
 
 @app.post("/api/v1/chat/message", response_model=ChatMessageResponse)

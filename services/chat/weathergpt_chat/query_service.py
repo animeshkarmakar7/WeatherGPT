@@ -70,23 +70,24 @@ class WeatherDataQueryService:
         if norm in self.settings.default_cities:
             lat, lon = self.settings.default_cities[norm]
             return lat, lon, norm
-        async with httpx.AsyncClient(timeout=4.0) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": norm, "count": 5, "language": "en", "format": "json"},
+                params={"name": norm, "count": 10, "language": "en", "format": "json", "countryCode": "IN"},
             )
             response.raise_for_status()
             results = response.json().get("results") or []
             if not results:
                 raise ValueError(f"No verified location found for '{location}'")
-            item = results[0]
+            india_results = [item for item in results if item.get("country_code") == "IN"]
+            item = india_results[0] if india_results else results[0]
             return float(item["latitude"]), float(item["longitude"]), str(item.get("name", location))
 
     async def get_weather_data(self, location: str, target_date: str = "current") -> WeatherDataFact:
         norm_loc = location.strip().lower()
         lat, lon, resolved_name = await self._resolve_coordinates(norm_loc)
         if target_date not in {"current", "today", "now"} and self.redis:
-            cache_key = f"weather:read:{norm_loc}:{target_date}"
+            cache_key = f"weather:read:v2:{norm_loc}:{target_date}"
             try:
                 cached = await self.redis.get(cache_key)
                 if cached:
@@ -99,7 +100,7 @@ class WeatherDataQueryService:
         if target_date not in {"current", "today", "now"} and self.redis:
             try:
                 await self.redis.setex(
-                    f"weather:read:{norm_loc}:{target_date}",
+                    f"weather:read:v2:{norm_loc}:{target_date}",
                     self.settings.weather_cache_ttl_seconds,
                     fact.model_dump_json(),
                 )
@@ -200,24 +201,29 @@ class WeatherDataQueryService:
         if is_current and current_temp is None:
             raise ValueError(f"Verified current temperature is unavailable for {location}")
         fetched_at = datetime.now(UTC)
+        observed_at = None
+        if is_current and current.get("time"):
+            observed_at = datetime.fromisoformat(str(current["time"]))
+        current_code = current.get("weather_code") if is_current else fields["wcode"]
+        current_precipitation = float(current.get("precipitation") or 0.0) if is_current else float(fields["precip"])
         return WeatherDataFact(
             location=location,
             latitude=lat,
             longitude=lon,
             target_date=target_date,
-            temp_c=float(current_temp) if current_temp is not None else round((float(fields["temp_min"]) + float(fields["temp_max"])) / 2.0, 1),
+            temp_c=float(current_temp) if current_temp is not None else None,
             temp_min_c=float(fields["temp_min"]),
             temp_max_c=float(fields["temp_max"]),
             humidity_pct=float(current["relative_humidity_2m"]) if is_current and current.get("relative_humidity_2m") is not None else None,
-            precipitation_mm=float(fields["precip"]),
+            precipitation_mm=current_precipitation,
             precipitation_probability_pct=float(fields["precip_prob"]),
-            wind_speed_kph=float(fields["wind"]),
-            weather_code=str(fields["wcode"]),
-            condition_description=_wmo_to_condition(fields["wcode"]),
-            will_rain=float(fields["precip"]) > 0 or float(fields["precip_prob"]) >= 50.0,
+            wind_speed_kph=float(current.get("wind_speed_10m")) if is_current and current.get("wind_speed_10m") is not None else float(fields["wind"]),
+            weather_code=str(current_code) if current_code is not None else None,
+            condition_description=_wmo_to_condition(current_code),
+            will_rain=current_precipitation > 0.0 if is_current else float(fields["precip_prob"]) >= 50.0,
             source="open_meteo",
             source_url="https://api.open-meteo.com/v1/forecast",
-            observed_at=None,
+            observed_at=observed_at,
             fetched_at=fetched_at,
             freshness="fresh",
         )

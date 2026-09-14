@@ -5,7 +5,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from .llm_client import LLMClient
-from .models import IntentType, QueryClassification, StructuredWeatherResponse, WeatherAspect
+from .models import IntentType, QueryClassification, StructuredWeatherResponse, WeatherAspect, WeatherDataFact, WeatherNarrativeResponse
 from .query_service import WeatherDataQueryService
 from .rag import RAGResponse, RAGSynthesizer
 
@@ -14,16 +14,18 @@ class AgentState(TypedDict):
     user_message: str
     session_id: str
     classification: QueryClassification | None
-    weather_fact: object | None
+    weather_fact: WeatherDataFact | None
     rag_response: RAGResponse | None
     structured_response: StructuredWeatherResponse | None
     final_text: str | None
 
 
-def _same_number(left: float | None, right: float | None) -> bool:
-    if left is None or right is None:
-        return left is None and right is None
-    return abs(left - right) < 1e-9
+def _confidence_for_fact(fact: WeatherDataFact) -> float:
+    required = [fact.location, fact.source, fact.target_date]
+    completeness = sum(value is not None and value != "" for value in required) / len(required)
+    freshness = {"fresh": 1.0, "stale": 0.75, "unknown": 0.5}.get(fact.freshness, 0.5)
+    source_factor = 1.0 if fact.source in {"open_meteo", "timescaledb", "imd", "noaa"} else 0.0
+    return round(min(1.0, completeness * freshness * source_factor), 2)
 
 
 def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_client: LLMClient, rag_synthesizer: RAGSynthesizer | None = None):
@@ -36,9 +38,10 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
         known_cities = ["pune", "mumbai", "delhi", "kolkata", "chennai", "bengaluru", "nagpur", "hyderabad", "ahmedabad", "jaipur", "lucknow", "surat", "thane", "navi mumbai", "nashik", "kochi", "manali"]
         detected_location = next((city for city in known_cities if city in msg), None)
         if not detected_location:
-            match = re.search(r"(?:in|of|at|for)\s+([a-zA-Z\s]{3,40})", raw_msg, re.IGNORECASE)
+            match = re.search(r"(?:in|of|at|for)\s+([a-zA-Z][a-zA-Z\s-]{2,60})", raw_msg, re.IGNORECASE)
             if match:
-                detected_location = re.split(r"\s+(?:tomorrow|today|now|right now|yesterday|this|next)\b", match.group(1).strip(), flags=re.IGNORECASE)[0].strip()
+                candidate = match.group(1).strip()
+                detected_location = re.split(r"\s+(?:tomorrow|today|now|right now|yesterday|this|next)\b", candidate, flags=re.IGNORECASE)[0].strip()
         if not detected_location:
             raise ValueError("A verified weather location is required")
         target_date = "tomorrow" if "tomorrow" in msg else "current"
@@ -76,54 +79,32 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
             return {"final_text": rag_resp.answer, "structured_response": None}
 
         fact = state.get("weather_fact")
-        if fact is None or getattr(fact, "source", "unavailable") == "unavailable":
+        if fact is None or fact.source == "unavailable":
             return {"final_text": "Verified weather data is unavailable for this request.", "structured_response": None}
 
-        fact_payload = {
-            "location": fact.location,
-            "target_date": fact.target_date,
-            "latitude": fact.latitude,
-            "longitude": fact.longitude,
-            "temperature_c": fact.temp_c,
-            "temperature_min_c": fact.temp_min_c,
-            "temperature_max_c": fact.temp_max_c,
-            "humidity_pct": fact.humidity_pct,
-            "precipitation_mm": fact.precipitation_mm,
-            "precipitation_probability_pct": fact.precipitation_probability_pct,
-            "wind_speed_kph": fact.wind_speed_kph,
-            "weather_code": fact.weather_code,
-            "condition": fact.condition_description,
-            "will_rain": fact.will_rain,
-            "source": fact.source,
-            "source_url": fact.source_url,
-            "observed_at": fact.observed_at.isoformat() if fact.observed_at else None,
-            "fetched_at": fact.fetched_at.isoformat() if fact.fetched_at else None,
-            "freshness": fact.freshness,
-        }
-        prompt = "Generate a concise weather response using only the supplied verified weather facts. Do not change, calculate, infer, round, or invent any numeric value. Do not add facts. Preserve the supplied location, target date, source, timestamps, and freshness. Return a valid StructuredWeatherResponse JSON object.\n\nFACTS:\n" + json.dumps(fact_payload, ensure_ascii=False)
-        system_prompt = "You are WeatherGPT's grounded weather answer generator. The supplied facts are authoritative. Never fabricate or estimate measurements. If a field is null, keep it null."
-        try:
-            structured = await llm_client.generate_structured(prompt, system_prompt, StructuredWeatherResponse)
-        except RuntimeError as exc:
-            raise RuntimeError("The language model is unavailable") from exc
-        checks = [
-            structured.location.lower() == fact.location.lower(),
-            structured.target_date == fact.target_date,
-            _same_number(structured.temp_c, fact.temp_c),
-            _same_number(structured.temp_min_c, fact.temp_min_c),
-            _same_number(structured.temp_max_c, fact.temp_max_c),
-            _same_number(structured.humidity_pct, fact.humidity_pct),
-            _same_number(structured.precipitation_probability_pct, fact.precipitation_probability_pct),
-            _same_number(structured.wind_speed_kph, fact.wind_speed_kph),
-            structured.will_rain == fact.will_rain,
-            structured.conditions == fact.condition_description,
-            structured.data_sources == [fact.source],
-        ]
-        if not all(checks):
-            raise RuntimeError("Generated weather response failed factual validation")
-        structured.observed_at = fact.observed_at
-        structured.fetched_at = fact.fetched_at
-        structured.freshness = fact.freshness
+        fact_payload = fact.model_dump(mode="json")
+        prompt = "Generate only a concise natural-language summary of the supplied verified weather facts. Use exactly the supplied values and do not add, calculate, infer, estimate, round, or invent any weather fact. State whether the data is current or a forecast and include the source when relevant. Return only JSON matching the requested schema.\n\nFACTS:\n" + json.dumps(fact_payload, ensure_ascii=False)
+        system_prompt = "You are WeatherGPT's grounded weather answer generator. You produce language from verified structured facts. Never fabricate, modify, estimate, or derive weather measurements."
+        narrative = await llm_client.generate_structured(prompt, system_prompt, WeatherNarrativeResponse)
+        structured = StructuredWeatherResponse(
+            location=fact.location,
+            target_date=fact.target_date,
+            summary=narrative.summary,
+            will_rain=fact.will_rain,
+            precipitation_probability_pct=fact.precipitation_probability_pct,
+            temp_c=fact.temp_c,
+            temp_min_c=fact.temp_min_c,
+            temp_max_c=fact.temp_max_c,
+            humidity_pct=fact.humidity_pct,
+            wind_speed_kph=fact.wind_speed_kph,
+            conditions=fact.condition_description,
+            confidence=_confidence_for_fact(fact),
+            data_sources=[fact.source],
+            quality_flags=[],
+            observed_at=fact.observed_at,
+            fetched_at=fact.fetched_at,
+            freshness=fact.freshness,
+        )
         return {"structured_response": structured, "final_text": structured.summary}
 
     workflow = StateGraph(AgentState)

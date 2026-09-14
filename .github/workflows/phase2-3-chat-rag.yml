@@ -8,12 +8,14 @@ on:
       - "services/frontend/**"
       - "docker-compose.yml"
       - "docker-compose.llm.yml"
+      - ".github/workflows/phase2-3-chat-rag.yml"
   pull_request:
     paths:
       - "services/chat/**"
       - "services/frontend/**"
       - "docker-compose.yml"
       - "docker-compose.llm.yml"
+      - ".github/workflows/phase2-3-chat-rag.yml"
 
 jobs:
   chat-rag:
@@ -27,11 +29,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: python -m pip install -U pip && python -m pip install .
+        run: python -m pip install -U pip && python -m pip install -e ".[dev]"
       - name: Compile
         run: python -m compileall -q weathergpt_chat
       - name: Tests
-        run: pytest -q
+        run: python -m pytest -q
 
   frontend:
     runs-on: ubuntu-latest

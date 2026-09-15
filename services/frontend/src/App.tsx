@@ -33,7 +33,7 @@ type CitySelection = {
   longitude: number;
 };
 
-const wmoIcon = (code?: number | string, size = 24) => {
+const wmoIcon = (code?: number | string | null, size = 24) => {
   const value = Number(code);
   if (value >= 95) return <Zap size={size} />;
   if (value >= 80) return <CloudRain size={size} />;
@@ -51,7 +51,17 @@ const formatDate = (value: string) =>
 
 const formatTime = (value?: string | null) => {
   if (!value) return "Unavailable";
-  return new Intl.DateTimeFormat("en-IN", { hour: "numeric", minute: "2-digit" }).format(new Date(value));
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "Unavailable";
+  }
+
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 };
 
 const readFavorites = (): CitySelection[] => {
@@ -263,10 +273,20 @@ export const App: React.FC = () => {
                   </div>
                   <button className={`favorite-button ${favoriteActive ? "saved" : ""}`} onClick={toggleFavorite} aria-label="Save city"><Star size={18} fill={favoriteActive ? "currentColor" : "none"} /></button>
                 </div>
-                <div className="hero-weather">
-                  <div className="hero-icon">{wmoIcon(current.weather_code, 64)}</div>
-                  <div><div className="hero-temp">{current.temp_c != null ? `${current.temp_c.toFixed(1)}°` : "—"}<span>C</span></div><div className="hero-range">Live conditions</div></div>
-                </div>
+               <div className="hero-weather">
+  <div className="hero-icon">
+    {wmoIcon(current.weather_code, 64)}
+  </div>
+
+  <div>
+    <div className="hero-temp">
+      {current.temp_c != null ? `${current.temp_c.toFixed(1)}°` : "—"}
+      <span>C</span>
+    </div>
+
+    <div className="hero-range">Live conditions</div>
+  </div>
+</div>
                 <div className="hero-meta">
                   <div><span>Feels</span><strong>{current.temp_c != null ? `${current.temp_c.toFixed(1)}°C` : "Unavailable"}</strong></div>
                   <div><span>Humidity</span><strong>{current.humidity_pct != null ? `${Math.round(current.humidity_pct)}%` : "Unavailable"}</strong></div>

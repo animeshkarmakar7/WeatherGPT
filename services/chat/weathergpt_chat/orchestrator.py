@@ -28,6 +28,17 @@ def _confidence_for_fact(fact: WeatherDataFact) -> float:
     return round(min(1.0, completeness * freshness * source_factor), 2)
 
 
+def _aspect_instruction(aspect: WeatherAspect) -> str:
+    instructions = {
+        WeatherAspect.TEMPERATURE: "Answer the temperature request first. Lead with the current or requested temperature value and use the temperature fields from FACTS. Do not let rain, wind, or other fields replace the requested temperature.",
+        WeatherAspect.RAIN: "Answer the rain or precipitation request first. Lead with precipitation amount or probability from FACTS when available and state the verified rain status.",
+        WeatherAspect.WIND: "Answer the wind request first. Lead with wind speed from FACTS and keep other weather details secondary.",
+        WeatherAspect.HUMIDITY: "Answer the humidity request first. Lead with humidity from FACTS and keep other weather details secondary.",
+        WeatherAspect.GENERAL: "Give a concise overview using the most relevant supplied weather facts.",
+    }
+    return instructions[aspect]
+
+
 def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_client: LLMClient, rag_synthesizer: RAGSynthesizer | None = None):
     async def query_classifier_node(state: AgentState) -> dict:
         raw_msg = state["user_message"]
@@ -52,6 +63,8 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
             aspect = WeatherAspect.TEMPERATURE
         elif "wind" in msg:
             aspect = WeatherAspect.WIND
+        elif "humid" in msg:
+            aspect = WeatherAspect.HUMIDITY
         return {"classification": QueryClassification(intent=IntentType.WEATHER_FORECAST if target_date == "tomorrow" else IntentType.WEATHER_CURRENT, location=detected_location, target_date=target_date, aspect=aspect, confidence=0.95)}
 
     def route_by_intent(state: AgentState) -> str:
@@ -82,9 +95,11 @@ def create_weather_orchestrator(query_service: WeatherDataQueryService, llm_clie
         if fact is None or fact.source == "unavailable":
             return {"final_text": "Verified weather data is unavailable for this request.", "structured_response": None}
 
+        classification = state.get("classification")
+        aspect = classification.aspect if classification is not None else WeatherAspect.GENERAL
         fact_payload = fact.model_dump(mode="json")
-        prompt = "Generate only a concise natural-language summary of the supplied verified weather facts. Use exactly the supplied values and do not add, calculate, infer, estimate, round, or invent any weather fact. State whether the data is current or a forecast and include the source when relevant. Return only JSON matching the requested schema.\n\nFACTS:\n" + json.dumps(fact_payload, ensure_ascii=False)
-        system_prompt = "You are WeatherGPT's grounded weather answer generator. You produce language from verified structured facts. Never fabricate, modify, estimate, or derive weather measurements."
+        prompt = "Generate only a concise natural-language answer to the user's weather request from the supplied verified facts. " + _aspect_instruction(aspect) + " Use exactly the supplied values and do not add, calculate, infer, estimate, round, or invent any weather fact. State whether the data is current or a forecast and include the source when relevant. Return only JSON matching the requested schema.\n\nUSER REQUEST:\n" + state["user_message"] + "\n\nREQUESTED ASPECT:\n" + aspect.value + "\n\nFACTS:\n" + json.dumps(fact_payload, ensure_ascii=False)
+        system_prompt = "You are WeatherGPT's grounded weather answer generator. You produce language from verified structured facts. Never fabricate, modify, estimate, or derive weather measurements. Answer the user's requested weather aspect directly before mentioning secondary facts."
         narrative = await llm_client.generate_structured(prompt, system_prompt, WeatherNarrativeResponse)
         structured = StructuredWeatherResponse(
             location=fact.location,

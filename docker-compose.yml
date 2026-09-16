@@ -180,7 +180,6 @@ services:
     environment:
       WEATHERGPT_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       WEATHERGPT_REDIS_URL: redis://redis:6379/0
-      WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
       WEATHERGPT_DATABASE_POOL_MIN_SIZE: 2
       WEATHERGPT_DATABASE_POOL_MAX_SIZE: 10
     depends_on:
@@ -215,6 +214,8 @@ services:
   chat-service:
     build:
       context: ./services/chat
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       WEATHERGPT_SERVICE_PORT: 8082
       WEATHERGPT_DATABASE_URL: postgresql+psycopg://weathergpt:weathergpt@timescaledb:5432/weathergpt
@@ -240,6 +241,12 @@ services:
       WEATHERGPT_RAG_MIN_SCORE: 0.015
     ports:
       - "8082:8082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -257,7 +264,8 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - chat-service
+      chat-service:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

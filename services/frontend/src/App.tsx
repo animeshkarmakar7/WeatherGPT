@@ -273,22 +273,20 @@ export const App: React.FC = () => {
                   </div>
                   <button className={`favorite-button ${favoriteActive ? "saved" : ""}`} onClick={toggleFavorite} aria-label="Save city"><Star size={18} fill={favoriteActive ? "currentColor" : "none"} /></button>
                 </div>
-               <div className="hero-weather">
-  <div className="hero-icon">
-    {wmoIcon(current.weather_code, 64)}
-  </div>
-
-  <div>
-    <div className="hero-temp">
-      {current.temp_c != null ? `${current.temp_c.toFixed(1)}°` : "—"}
-      <span>C</span>
-    </div>
-
-    <div className="hero-range">Live conditions</div>
-  </div>
-</div>
+                <div className="hero-weather">
+                  <div className="hero-icon">
+                    {wmoIcon(current.weather_code, 64)}
+                  </div>
+                  <div>
+                    <div className="hero-temp">
+                      {current.temp_c != null ? `${current.temp_c.toFixed(1)}°` : "—"}
+                      <span>C</span>
+                    </div>
+                    <div className="hero-range">Live conditions</div>
+                  </div>
+                </div>
                 <div className="hero-meta">
-                  <div><span>Feels</span><strong>{current.temp_c != null ? `${current.temp_c.toFixed(1)}°C` : "Unavailable"}</strong></div>
+                  <div><span>Temperature</span><strong>{current.temp_c != null ? `${current.temp_c.toFixed(1)}°C` : "Unavailable"}</strong></div>
                   <div><span>Humidity</span><strong>{current.humidity_pct != null ? `${Math.round(current.humidity_pct)}%` : "Unavailable"}</strong></div>
                   <div><span>Wind</span><strong>{current.wind_speed_kph != null ? `${current.wind_speed_kph.toFixed(1)} km/h` : "Unavailable"}</strong></div>
                   <div><span>Rain now</span><strong>{current.precipitation_mm != null ? `${current.precipitation_mm.toFixed(1)} mm` : "Unavailable"}</strong></div>

@@ -30,6 +30,8 @@ class FakeQueryService:
 class FakeLLM:
     async def generate_structured(self, prompt, system_prompt, response_model):
         assert response_model is WeatherNarrativeResponse
+        assert "REQUESTED ASPECT:\ntemperature" in prompt
+        assert "Answer the temperature request first." in prompt
         return response_model(summary="Current temperature in Pune is 28.0°C.")
 
 
@@ -48,6 +50,7 @@ async def test_weather_query_returns_source_derived_structured_data():
         }
     )
     assert result["classification"].intent == IntentType.WEATHER_CURRENT
+    assert result["classification"].aspect.value == "temperature"
     assert result["structured_response"].temp_c == 28.0
     assert result["structured_response"].temp_min_c == 24.0
     assert result["structured_response"].temp_max_c == 30.0

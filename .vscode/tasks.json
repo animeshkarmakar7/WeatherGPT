@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "WeatherGPT: Start full stack with Docker vLLM",
+      "type": "shell",
+      "command": "docker compose -f docker-compose.yml -f docker-compose.llm.yml up -d --build",
+      "problemMatcher": []
+    },
+    {
+      "label": "WeatherGPT: Start base stack",
+      "type": "shell",
+      "command": "docker compose up -d --build",
+      "problemMatcher": []
+    },
+    {
+      "label": "WeatherGPT: Stop stack",
+      "type": "shell",
+      "command": "docker compose -f docker-compose.yml -f docker-compose.llm.yml down",
+      "problemMatcher": []
+    },
+    {
+      "label": "WeatherGPT: Rebuild chat and frontend",
+      "type": "shell",
+      "command": "docker compose build --no-cache chat-service frontend",
+      "problemMatcher": []
+    }
+  ]
+}

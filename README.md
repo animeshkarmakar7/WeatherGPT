@@ -52,9 +52,13 @@ Weather facts come only from verified ingestion or live upstream providers. The 
 
 ## Start Infrastructure
 
+Run the base stack:
+
 ```bash
 docker compose up --build
 ```
+
+This base stack expects a reachable OpenAI-compatible LLM endpoint. On Windows and Docker Desktop, the default endpoint is `http://host.docker.internal:8000/v1`. On native Linux, the Compose file maps `host.docker.internal` to the host gateway.
 
 Run a local vLLM server for the chat service:
 
@@ -62,13 +66,19 @@ Run a local vLLM server for the chat service:
 vllm serve Qwen/Qwen2.5-7B-Instruct --host 0.0.0.0 --port 8000 --api-key dummy-vllm-key --generation-config vllm
 ```
 
-Or use the included vLLM compose file on a GPU host:
+Run the complete stack with vLLM inside Docker:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.llm.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.llm.yml up -d --build
 ```
 
+Do not run `docker compose -f docker-compose.llm.yml up` by itself. `docker-compose.llm.yml` is an override file and must be combined with `docker-compose.yml`.
+
+The chat image includes the Python ML/RAG runtime. BGE-M3 and the cross-encoder reranker are runtime model dependencies, so the Compose stack mounts a persistent `chat-model-cache` volume at `/models` instead of growing the container writable layer with downloaded model files.
+
 The chat service intentionally fails startup when the configured LLM is unavailable. It does not silently substitute a fake model.
+
+## Phase 1 Check
 
 ## Phase 1 Check
 

@@ -242,6 +242,8 @@ services:
       WEATHERGPT_RAG_MIN_SCORE: 0.015
     ports:
       - "8082:8082"
+    volumes:
+      - chat-model-cache:/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=3)"]
       interval: 10s
@@ -274,3 +276,4 @@ volumes:
   minio-data:
   qdrant-data:
   spark-checkpoints:
+  chat-model-cache:

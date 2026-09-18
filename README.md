@@ -80,8 +80,6 @@ The chat service intentionally fails startup when the configured LLM is unavaila
 
 ## Phase 1 Check
 
-## Phase 1 Check
-
 ```bash
 curl -X POST "http://localhost:8081/ingest/current?city=mumbai"
 curl "http://localhost:8081/observations/current?city=mumbai"

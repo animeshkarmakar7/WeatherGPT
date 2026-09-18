@@ -35,8 +35,10 @@ class HybridRetriever:
         self.embedder = embedder
         self.rrf_k = rrf_k
         self.candidate_k = max(candidate_k, 5)
-        model_path = reranker_model_path or "BAAI/bge-reranker-v2-m3"
-        self._reranker = _CrossEncoderReranker(model_path, reranker_fp16) if use_reranker else None
+        self._reranker_model_path = reranker_model_path or "BAAI/bge-reranker-v2-m3"
+        self._reranker_fp16 = reranker_fp16
+        self._use_reranker = use_reranker
+        self._reranker = None
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -86,7 +88,9 @@ class HybridRetriever:
             combined.append(SearchResult(chunk=chunk, dense_score=dense_score.get(chunk_id, 0.0), bm25_score=bm25_score.get(chunk_id, 0.0), rrf_score=rrf, rerank_score=score))
         combined.sort(key=lambda item: item.rrf_score, reverse=True)
         candidates = combined[:candidate_limit]
-        if self._reranker:
+        if self._use_reranker:
+            if self._reranker is None:
+                self._reranker = _CrossEncoderReranker(self._reranker_model_path, self._reranker_fp16)
             candidates = self._reranker.rerank(query, candidates)
         else:
             candidates.sort(key=lambda item: item.rrf_score, reverse=True)
